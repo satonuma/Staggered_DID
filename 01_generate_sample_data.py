@@ -4,13 +4,19 @@
 デジタルコンテンツ視聴（Webinar, e-contents, web講演会）の効果検証
 ===================================================================
 設計:
-  - 納入データ: 日別・施設別 (doctor_idなし, 整数額)
-  - 施設ごとに月間納入回数が異なる (月1~5回)
+  - 売上データ: 日別・施設別 (doctor_idなし, 整数額)
+  - 施設ごとに月間売上回数が異なる (月1~5回)
   - 1施設に複数医師所属あり / 1医師が複数施設所属あり
   - 視聴パターン: 未視聴 / wash-out視聴 / 単発 / 定常 / 離脱 / 遅延
   - 観測期間: 2023/4 ~ 2025/12 (33ヶ月)
-  - CATE用属性: 地域/施設タイプ/経験年数/診療科
+  - CATE用属性: ベースライン納入額カテゴリ
     → 処置効果に異質性あり (modifier で乗算)
+
+出力形式: 本番データに準拠
+  - rw_list.csv: RW医師リスト (ENT絞込済、品目カラムなし)
+  - sales.csv: 売上実績 (日付・実績が文字列)
+  - デジタル視聴データ.csv: Webinar/e-contentsの視聴ログ
+  - 活動データ.csv: web講演会+その他の活動記録
 ===================================================================
 """
 
@@ -27,31 +33,30 @@ NOISE_SD = 18
 PER_DOCTOR_BASE = 100
 TREND = 1.2
 
+# === 品目コード (パラメータ) ===
+ENT_PRODUCT_CODE = "00001"   # ENTの品目コード (5桁文字列)
+PRODUCT_CODES = {
+    "ENT": "00001", "CNS": "00002", "GI": "00003",
+    "CV": "00004", "その他": "00005",
+}
+
 CONTENT_TYPES = ["Webinar", "e-contents", "web講演会"]
 CHANNEL_EFFECTS = {"Webinar": 18, "e-contents": 10, "web講演会": 22}
 CHANNEL_GROWTH = 1.0    # 視聴継続中の月次成長
 DECAY_RATE = 1.5        # 視聴停止後の月次減衰
 GRACE_MONTHS = 2        # 視聴停止後の猶予期間
 
-# チャネルマスタ: 細分化チャネル → 大分類へのマッピング
-CHANNEL_MASTER_DATA = [
-    {"channel_id": "CH01", "channel_name": "Web講演会 LIVE",        "channel_category": "web講演会"},
-    {"channel_id": "CH02", "channel_name": "Web講演会 オンデマンド", "channel_category": "web講演会"},
-    {"channel_id": "CH03", "channel_name": "Web講演会 アーカイブ",  "channel_category": "web講演会"},
-    {"channel_id": "CH04", "channel_name": "Webinar 社内講演",      "channel_category": "Webinar"},
-    {"channel_id": "CH05", "channel_name": "Webinar 学術講演",      "channel_category": "Webinar"},
-    {"channel_id": "CH06", "channel_name": "Webinar セミナー",      "channel_category": "Webinar"},
-    {"channel_id": "CH07", "channel_name": "e-contents 動画",       "channel_category": "e-contents"},
-    {"channel_id": "CH08", "channel_name": "e-contents PDF資料",    "channel_category": "e-contents"},
-    {"channel_id": "CH09", "channel_name": "e-contents インタラクティブ", "channel_category": "e-contents"},
-    {"channel_id": "CH10", "channel_name": "メルマガ配信",          "channel_category": "その他"},
-    {"channel_id": "CH11", "channel_name": "アンケート回答",        "channel_category": "その他"},
-    {"channel_id": "CH12", "channel_name": "資材ダウンロード",      "channel_category": "その他"},
-]
-# 大分類 → 細分化チャネルIDの逆引き
-CATEGORY_TO_CHANNELS = {}
-for _ch in CHANNEL_MASTER_DATA:
-    CATEGORY_TO_CHANNELS.setdefault(_ch["channel_category"], []).append(_ch["channel_id"])
+# 活動種別マッピング (チャネル → 活動種別コード)
+ACTIVITY_TYPE_MAP = {
+    "Webinar":    ["AT01", "AT02", "AT03"],
+    "e-contents": ["AT04", "AT05", "AT06"],
+    "web講演会":  ["AT07", "AT08", "AT09"],
+    "面談":       ["AT13", "AT14"],
+    "面談_アポ":  ["AT15", "AT16"],
+    "説明会":     ["AT17", "AT18"],
+    "その他":     ["AT10", "AT11", "AT12"],
+}
+ACTIVITY_CHANNEL_FILTER = "web講演会"  # 活動データから抽出する活動種別
 
 PRODUCTS = ["ENT", "CNS", "GI", "CV", "その他"]
 PRODUCT_BASE_RATIO = {"CNS": 0.65, "GI": 0.55, "CV": 0.45, "その他": 0.30}
@@ -88,7 +93,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_DIR = os.path.join(SCRIPT_DIR, "data")
 # ロック回避: 既存CSVが開かれている場合は別ディレクトリに出力
 _locked = False
-for _fn in ["delivery_data.csv", "facility_master.csv", "rw_doctor_list.csv", "doctor_master.csv", "viewing_logs.csv", "channel_master.csv"]:
+for _fn in ["rw_list.csv", "sales.csv", "デジタル視聴データ.csv", "活動データ.csv"]:
     _fp = os.path.join(OUTPUT_DIR, _fn)
     if os.path.exists(_fp):
         try:
@@ -104,7 +109,7 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 months = pd.date_range(start=START_DATE, periods=N_MONTHS, freq="MS")
 
-# === 1. 施設マスター ===
+# === 1. 施設マスター (内部用) ===
 facility_ids = [f"F{i:03d}" for i in range(1, N_FACILITIES + 1)]
 facility_effects = np.random.normal(0, 15.0, N_FACILITIES)
 fac_effect_map = dict(zip(facility_ids, facility_effects))
@@ -131,8 +136,26 @@ facilities = pd.DataFrame({
 })
 fac_region_map = dict(zip(facility_ids, regions))
 fac_type_map = dict(zip(facility_ids, fac_types))
+fac_honin_name_map = dict(zip(facilities["facility_id"], facilities["facility_name"]))
 
-# === 2. 医師マスター ===
+# fac (DCF施設コード): 大半はfac_honinと同じ、約10%が異なる
+fac_map = {}
+for i, fid in enumerate(facility_ids):
+    if i % 10 == 0:
+        fac_map[fid] = f"G{fid[1:]}"
+    else:
+        fac_map[fid] = fid
+
+# fac_name_map: facility_id → fac列の施設名
+fac_name_map = {}
+for fid in facility_ids:
+    fc = fac_map[fid]
+    if fc == fid:
+        fac_name_map[fid] = fac_honin_name_map[fid]
+    else:
+        fac_name_map[fid] = f"分院{fc[1:]}"
+
+# === 2. 医師マスター (内部用) ===
 doc_records = []
 doc_counter = 0
 for fac_id, n_docs in zip(facility_ids, DOC_COUNTS):
@@ -173,6 +196,9 @@ def exp_category(years):
 
 doc_exp_cat = {d: exp_category(y) for d, y in doc_exp_years.items()}
 
+# 医師名マップ
+doc_name_map = {d: f"医師{int(d[1:]):04d}" for d in unique_doc_ids}
+
 # primary facility
 primary_fac_map = {}
 for rec in doc_records:
@@ -195,7 +221,7 @@ doc_rw_flag = {}
 for d in unique_doc_ids:
     if np.random.random() < ENT_DOCTOR_RATE:
         doc_product[d] = "ENT"
-        doc_rw_flag[d] = "対象" if np.random.random() < RW_FLAG_RATE else ""
+        doc_rw_flag[d] = "RW" if np.random.random() < RW_FLAG_RATE else ""
     else:
         doc_product[d] = np.random.choice(["CNS", "GI", "CV", "その他"])
         doc_rw_flag[d] = ""
@@ -241,19 +267,27 @@ for doc_id, pattern in zip(treated_ids, assigned_patterns):
 
     doctor_info[doc_id] = {"pattern": pattern, "channels": ch_info}
 
-# === 4. 日別視聴ログ ===
+# === 4. 日別視聴ログ (本番形式) ===
 viewing_records = []
 for doc_id, info in doctor_info.items():
     fac_ids_for_doc = doctors.loc[doctors["doctor_id"] == doc_id, "facility_id"].values
     primary_fac = fac_ids_for_doc[0]
+    prod_code = PRODUCT_CODES[doc_product[doc_id]]
 
     for ch, (first_m, last_m) in info["channels"].items():
         first_date = months[first_m]
         first_offset = np.random.randint(0, min(28, first_date.days_in_month))
         viewing_records.append({
-            "view_date": (first_date + pd.Timedelta(days=first_offset)).strftime("%Y-%m-%d"),
-            "doctor_id": doc_id, "facility_id": primary_fac,
-            "channel_id": np.random.choice(CATEGORY_TO_CHANNELS[ch]),
+            "活動日_dt": (first_date + pd.Timedelta(days=first_offset)).strftime("%Y-%m-%d"),
+            "品目コード": prod_code,
+            "活動種別": ch,
+            "活動種別コード": np.random.choice(ACTIVITY_TYPE_MAP[ch]),
+            "dcf_fac": primary_fac,
+            "fac_honin": primary_fac,
+            "fac": fac_map[primary_fac],
+            "dcf_doc": doc_id,
+            "doc": doc_id,
+            "doc_name": doc_name_map[doc_id],
         })
 
         active_months = last_m - first_m
@@ -279,17 +313,24 @@ for doc_id, info in doctor_info.items():
                 vd = first_date + pd.Timedelta(days=int(off))
                 if vd <= end_date:
                     viewing_records.append({
-                        "view_date": vd.strftime("%Y-%m-%d"),
-                        "doctor_id": doc_id, "facility_id": primary_fac,
-                        "channel_id": np.random.choice(CATEGORY_TO_CHANNELS[ch]),
+                        "活動日_dt": vd.strftime("%Y-%m-%d"),
+                        "品目コード": prod_code,
+                        "活動種別": ch,
+                        "活動種別コード": np.random.choice(ACTIVITY_TYPE_MAP[ch]),
+                        "dcf_fac": primary_fac,
+                        "fac_honin": primary_fac,
+                        "fac": fac_map[primary_fac],
+                        "dcf_doc": doc_id,
+                        "doc": doc_id,
+                        "doc_name": doc_name_map[doc_id],
                     })
 
-# その他チャネルの視聴記録を追加（処置効果なし）
-sonota_channels = CATEGORY_TO_CHANNELS["その他"]
+# その他活動の記録を追加（処置効果なし → ノイズ）
 n_sonota_viewers = int(n_treated * 0.25)
 sonota_viewer_ids = np.random.choice(treated_ids, n_sonota_viewers, replace=False)
 for doc_id in sonota_viewer_ids:
     primary_fac = primary_fac_map[doc_id]
+    prod_code = PRODUCT_CODES[doc_product[doc_id]]
     n_views = np.random.randint(1, 6)
     for _ in range(n_views):
         view_month = np.random.randint(0, N_MONTHS)
@@ -297,15 +338,53 @@ for doc_id in sonota_viewer_ids:
         day_offset = np.random.randint(0, month_start.days_in_month)
         vd = month_start + pd.Timedelta(days=day_offset)
         viewing_records.append({
-            "view_date": vd.strftime("%Y-%m-%d"),
-            "doctor_id": doc_id,
-            "facility_id": primary_fac,
-            "channel_id": np.random.choice(sonota_channels),
+            "活動日_dt": vd.strftime("%Y-%m-%d"),
+            "品目コード": prod_code,
+            "活動種別": "その他",
+            "活動種別コード": np.random.choice(ACTIVITY_TYPE_MAP["その他"]),
+            "dcf_fac": primary_fac,
+            "fac_honin": primary_fac,
+            "fac": fac_map[primary_fac],
+            "dcf_doc": doc_id,
+            "doc": doc_id,
+            "doc_name": doc_name_map[doc_id],
         })
+
+# MR活動の記録を追加（面談・面談_アポ・説明会）— 全ENT医師対象
+ent_doc_ids = [d for d in unique_doc_ids if doc_product[d] == "ENT"]
+mr_type_choices = ["面談", "面談_アポ", "説明会"]
+mr_type_probs = [0.60, 0.25, 0.15]
+
+for doc_id in ent_doc_ids:
+    primary_fac = primary_fac_map[doc_id]
+    prod_code = PRODUCT_CODES["ENT"]
+    # 月ごとに0〜3回程度 (Poisson λ=1.0)
+    for t in range(N_MONTHS):
+        n_mr = np.random.poisson(1.0)
+        if n_mr == 0:
+            continue
+        n_mr = min(n_mr, 3)
+        month_start = months[t]
+        for _ in range(n_mr):
+            mr_type = np.random.choice(mr_type_choices, p=mr_type_probs)
+            day_offset = np.random.randint(0, month_start.days_in_month)
+            vd = month_start + pd.Timedelta(days=day_offset)
+            viewing_records.append({
+                "活動日_dt": vd.strftime("%Y-%m-%d"),
+                "品目コード": prod_code,
+                "活動種別": mr_type,
+                "活動種別コード": np.random.choice(ACTIVITY_TYPE_MAP[mr_type]),
+                "dcf_fac": primary_fac,
+                "fac_honin": primary_fac,
+                "fac": fac_map[primary_fac],
+                "dcf_doc": doc_id,
+                "doc": doc_id,
+                "doc_name": doc_name_map[doc_id],
+            })
 
 viewing_df = pd.DataFrame(viewing_records)
 
-# === 5. 日別施設別納入データ ===
+# === 5. 日別施設別売上データ (本番形式) ===
 fac_doctors_grp = doctors.groupby("facility_id")
 daily_records = []
 
@@ -357,7 +436,6 @@ for fac_id, grp in fac_doctors_grp:
         if n_del == 1:
             del_days = [np.random.randint(0, n_days)]
         else:
-            # 均等間隔 + ランダムジッター
             interval = n_days / n_del
             del_days = []
             for k in range(n_del):
@@ -377,13 +455,14 @@ for fac_id, grp in fac_doctors_grp:
             a = max(0, int(amts[i]))
             if a > 0:
                 daily_records.append({
-                    "delivery_date": (month_start + pd.Timedelta(days=int(d))).strftime("%Y-%m-%d"),
-                    "facility_id": fac_id,
-                    "品目": "ENT",
-                    "amount": a,
+                    "日付": (month_start + pd.Timedelta(days=int(d))).strftime("%Y%m%d"),
+                    "施設（本院に合算）コード": fac_id,
+                    "DCF施設コード": fac_id,
+                    "品目コード": PRODUCT_CODES["ENT"],
+                    "実績": a,
                 })
 
-# 他品目(CNS, GI, CV, その他)の納入レコードを簡易生成
+# 他品目(CNS, GI, CV, その他)の売上レコードを簡易生成
 for fac_id in facility_ids:
     base_freq = fac_delivery_freq[fac_id]
     for t in range(N_MONTHS):
@@ -397,42 +476,51 @@ for fac_id in facility_ids:
                 if amt > 0:
                     day = np.random.randint(0, n_days)
                     daily_records.append({
-                        "delivery_date": (month_start + pd.Timedelta(days=int(day))).strftime("%Y-%m-%d"),
-                        "facility_id": fac_id,
-                        "品目": prod,
-                        "amount": amt,
+                        "日付": (month_start + pd.Timedelta(days=int(day))).strftime("%Y%m%d"),
+                        "施設（本院に合算）コード": fac_id,
+                        "DCF施設コード": fac_id,
+                        "品目コード": PRODUCT_CODES[prod],
+                        "実績": amt,
                     })
 
 delivery_df = pd.DataFrame(daily_records)
 
 # === 6. CSV保存 ===
-doctors["品目"] = doctors["doctor_id"].map(doc_product)
-doctors["rw_flag"] = doctors["doctor_id"].map(doc_rw_flag)
-doctors["experience_years"] = doctors["doctor_id"].map(doc_exp_years)
-doctors["experience_cat"] = doctors["doctor_id"].map(doc_exp_cat)
-doctors["specialty"] = doctors["doctor_id"].map(doc_specialties)
+# rw_list.csv: ENT医師のみ (品目カラムなし、本番と同じ)
+ent_doctors = doctors[doctors["doctor_id"].map(doc_product) == "ENT"].copy()
+rw_list_out = pd.DataFrame({
+    "doc": ent_doctors["doctor_id"].values,
+    "doc_name": [doc_name_map[d] for d in ent_doctors["doctor_id"]],
+    "fac_honin": ent_doctors["facility_id"].values,
+    "fac_honin_name": [fac_honin_name_map[f] for f in ent_doctors["facility_id"]],
+    "fac": [fac_map[f] for f in ent_doctors["facility_id"]],
+    "fac_name": [fac_name_map[f] for f in ent_doctors["facility_id"]],
+    "seg": [doc_rw_flag[d] for d in ent_doctors["doctor_id"]],
+})
+rw_list_out.to_csv(
+    os.path.join(OUTPUT_DIR, "rw_list.csv"), index=False, encoding="utf-8-sig")
 
-# RW医師リスト (施設-医師-品目-RWフラグのみ)
-doctors[["doctor_id", "facility_id", "品目", "rw_flag"]].to_csv(
-    os.path.join(OUTPUT_DIR, "rw_doctor_list.csv"), index=False, encoding="utf-8-sig")
+# sales.csv: 全品目 (実績を文字列に変換)
+sales_out = delivery_df.copy()
+sales_out["実績"] = sales_out["実績"].astype(str)
+sales_out.to_csv(
+    os.path.join(OUTPUT_DIR, "sales.csv"), index=False, encoding="utf-8-sig")
 
-# 医師マスタ (属性情報, 1医師1行)
-doctor_master_df = doctors.drop_duplicates(subset="doctor_id", keep="first")
-doctor_master_df[["doctor_id", "experience_years", "experience_cat", "specialty"]].to_csv(
-    os.path.join(OUTPUT_DIR, "doctor_master.csv"), index=False, encoding="utf-8-sig")
+# デジタル視聴データ.csv: Webinar + e-contents
+digital_df = viewing_df[viewing_df["活動種別"].isin(["Webinar", "e-contents"])].copy()
+digital_cols = ["活動日_dt", "品目コード", "活動種別", "活動種別コード",
+                "dcf_fac", "fac_honin", "fac", "dcf_doc", "doc", "doc_name"]
+digital_df[digital_cols].to_csv(
+    os.path.join(OUTPUT_DIR, "デジタル視聴データ.csv"), index=False, encoding="utf-8-sig")
 
-# 施設マスタ (monthly_delivery_freqは除外 — 納入データから算出する)
-facilities[["facility_id", "facility_name", "region", "facility_type"]].to_csv(
-    os.path.join(OUTPUT_DIR, "facility_master.csv"), index=False, encoding="utf-8-sig")
-
-# チャネルマスタ
-pd.DataFrame(CHANNEL_MASTER_DATA).to_csv(
-    os.path.join(OUTPUT_DIR, "channel_master.csv"), index=False, encoding="utf-8-sig")
-
-delivery_df.to_csv(
-    os.path.join(OUTPUT_DIR, "delivery_data.csv"), index=False, encoding="utf-8-sig")
-viewing_df.to_csv(
-    os.path.join(OUTPUT_DIR, "viewing_logs.csv"), index=False, encoding="utf-8-sig")
+# 活動データ.csv: web講演会 + 面談 + 面談_アポ + 説明会 + その他 (活動種別コードが先)
+activity_df = viewing_df[viewing_df["活動種別"].isin(
+    ["web講演会", "面談", "面談_アポ", "説明会", "その他"]
+)].copy()
+activity_cols = ["活動日_dt", "品目コード", "活動種別コード", "活動種別",
+                 "dcf_fac", "fac_honin", "fac", "dcf_doc", "doc"]
+activity_df[activity_cols].to_csv(
+    os.path.join(OUTPUT_DIR, "活動データ.csv"), index=False, encoding="utf-8-sig")
 
 # === 7. サマリー ===
 multi_fac_set = set(multi_fac_doc_ids)
@@ -443,7 +531,7 @@ clean_pairs = [
 ]
 
 print("=" * 60)
-print(" サンプルデータ生成完了")
+print(" サンプルデータ生成完了 (本番形式)")
 print("=" * 60)
 print(f"観測期間      : {months[0].strftime('%Y-%m')} ~ {months[-1].strftime('%Y-%m')} ({N_MONTHS}ヶ月)")
 print(f"施設数        : {N_FACILITIES} (1医師:{N_SINGLE} / 2医師:{N_DOUBLE} / 3医師:{N_TRIPLE} / 4医師:{N_QUAD})")
@@ -455,20 +543,10 @@ for pat in patterns:
     n = sum(1 for info in doctor_info.values() if info["pattern"] == pat)
     print(f"  {pat:<12}: {n}名")
 
-print(f"\n施設別月間納入回数:")
+print(f"\n施設別月間売上回数:")
 freq_dist = pd.Series([fac_delivery_freq[f] for f in facility_ids]).value_counts().sort_index()
 for freq, cnt in freq_dist.items():
     print(f"  月{freq}回: {cnt}施設")
-
-print(f"\nCATE用属性:")
-for attr, vals in [("region", list(regions)), ("facility_type", list(fac_types))]:
-    vc = pd.Series(vals).value_counts()
-    print(f"  {attr}: " + ", ".join(f"{k}={v}" for k, v in vc.items()))
-for attr, mapping in [("experience_cat", doc_exp_cat), ("specialty", doc_specialties)]:
-    vc = pd.Series(list(mapping.values())).value_counts()
-    print(f"  {attr}: " + ", ".join(f"{k}={v}" for k, v in vc.items()))
-mod_vals = list(doc_modifier.values())
-print(f"  modifier: min={min(mod_vals):.3f}, mean={np.mean(mod_vals):.3f}, max={max(mod_vals):.3f}")
 
 print(f"\nDGP処置効果の設計:")
 print(f"  チャネル基本効果: {CHANNEL_EFFECTS}")
@@ -478,6 +556,9 @@ for dim, mods in [("地域", REGION_MODIFIER), ("施設タイプ", TYPE_MODIFIER
                   ("経験年数", EXP_MODIFIER), ("診療科", SPEC_MODIFIER)]:
     print(f"    {dim}: " + ", ".join(f"{k}={v}" for k, v in mods.items()))
 
+mod_vals = list(doc_modifier.values())
+print(f"  modifier: min={min(mod_vals):.3f}, mean={np.mean(mod_vals):.3f}, max={max(mod_vals):.3f}")
+
 print(f"\n1施設1医師 AND 1医師1施設 : {len(clean_pairs)} 施設")
 n_clean_treated = sum(
     1 for f in clean_pairs
@@ -486,41 +567,50 @@ n_clean_treated = sum(
 print(f"  うち視聴あり: {n_clean_treated}, 視聴なし: {len(clean_pairs) - n_clean_treated}")
 
 n_ent_doctors = sum(1 for d in unique_doc_ids if doc_product[d] == "ENT")
-n_rw_doctors = sum(1 for d in unique_doc_ids if doc_rw_flag[d] == "対象")
+n_rw_doctors = sum(1 for d in unique_doc_ids if doc_rw_flag[d] == "RW")
 
 print(f"\n品目・RWフラグ:")
 print(f"  ENT医師数     : {n_ent_doctors} / {N_DOCTORS} ({n_ent_doctors/N_DOCTORS*100:.1f}%)")
 print(f"  RWフラグ医師数: {n_rw_doctors} / {n_ent_doctors} ENT医師 ({n_rw_doctors/n_ent_doctors*100:.1f}%)")
 
-print(f"\n品目別納入行数:")
-for prod in PRODUCTS:
-    n_rows = len(delivery_df[delivery_df["品目"] == prod])
-    print(f"  {prod:<6}: {n_rows:>8,} 行")
+print(f"\n品目別売上行数:")
+for prod_name in PRODUCTS:
+    prod_code = PRODUCT_CODES[prod_name]
+    n_rows = len(delivery_df[delivery_df["品目コード"] == prod_code])
+    print(f"  {prod_name:<6} ({prod_code}): {n_rows:>8,} 行")
 
-print(f"\n納入データ統計 (ENT品目):")
-ent_delivery = delivery_df[delivery_df["品目"] == "ENT"]
-print(f"  1件あたり金額: 平均{ent_delivery['amount'].mean():.0f}, 中央値{ent_delivery['amount'].median():.0f}, "
-      f"min={ent_delivery['amount'].min()}, max={ent_delivery['amount'].max()}")
+print(f"\n売上データ統計 (ENT品目):")
+ent_delivery = delivery_df[delivery_df["品目コード"] == PRODUCT_CODES["ENT"]]
+print(f"  1件あたり金額: 平均{ent_delivery['実績'].mean():.0f}, 中央値{ent_delivery['実績'].median():.0f}, "
+      f"min={ent_delivery['実績'].min()}, max={ent_delivery['実績'].max()}")
 
-print(f"\nチャネルマスタ:")
-print(f"  大分類 → 細分化チャネル数:")
-for cat, chs in CATEGORY_TO_CHANNELS.items():
-    print(f"    {cat:<12}: {len(chs)} チャネル ({', '.join(chs)})")
+print(f"\n活動種別マッピング:")
+for cat, codes in ACTIVITY_TYPE_MAP.items():
+    print(f"  {cat:<12}: {len(codes)} コード ({', '.join(codes)})")
 
-n_sonota_views = len(viewing_df[viewing_df["channel_id"].isin(CATEGORY_TO_CHANNELS["その他"])])
-print(f"  その他チャネル視聴レコード: {n_sonota_views} 行")
+n_digital_views = len(digital_df)
+n_activity_views = len(activity_df)
+n_web_lecture = len(activity_df[activity_df["活動種別"] == "web講演会"])
+n_mendan = len(activity_df[activity_df["活動種別"] == "面談"])
+n_mendan_apo = len(activity_df[activity_df["活動種別"] == "面談_アポ"])
+n_setsumeikai = len(activity_df[activity_df["活動種別"] == "説明会"])
+n_sonota_views = len(activity_df[activity_df["活動種別"] == "その他"])
+print(f"\n視聴・活動データ:")
+print(f"  デジタル視聴データ: {n_digital_views:,} 行 (Webinar + e-contents)")
+print(f"  活動データ: {n_activity_views:,} 行")
+print(f"    web講演会: {n_web_lecture:,} / 面談: {n_mendan:,} / 面談_アポ: {n_mendan_apo:,} / 説明会: {n_setsumeikai:,} / その他: {n_sonota_views:,}")
+
+print(f"\nfac/fac_honin 不一致:")
+n_diff_fac = sum(1 for fid in facility_ids if fac_map[fid] != fid)
+print(f"  {n_diff_fac} / {N_FACILITIES} 施設で fac != fac_honin")
 
 print(f"\n出力ファイル:")
-print(f"  delivery_data.csv   : {len(delivery_df):>8,} 行 (日別施設別, 品目付き)")
-print(f"  viewing_logs.csv    : {len(viewing_df):>8,} 行 (日別医師別, channel_id付き)")
-print(f"  rw_doctor_list.csv  : {len(doctors):>8} 行 (施設-医師-品目-RWフラグのみ)")
-print(f"  doctor_master.csv   : {len(doctor_master_df):>8} 行 (医師属性)")
-print(f"  facility_master.csv : {N_FACILITIES:>8} 行 (施設属性)")
-print(f"  channel_master.csv  : {len(CHANNEL_MASTER_DATA):>8} 行 (チャネルマスタ)")
+print(f"  rw_list.csv          : {len(rw_list_out):>8} 行 (ENT医師, seg=RWフラグ)")
+print(f"  sales.csv            : {len(delivery_df):>8,} 行 (日別施設別, 全品目)")
+print(f"  デジタル視聴データ.csv: {n_digital_views:>8,} 行 (Webinar + e-contents)")
+print(f"  活動データ.csv        : {n_activity_views:>8,} 行 (web講演会 + 面談 + 面談_アポ + 説明会 + その他)")
 print(f"\nカラム名:")
-print(f"  delivery_data  : delivery_date, facility_id, 品目, amount")
-print(f"  viewing_logs   : view_date, doctor_id, facility_id, channel_id")
-print(f"  rw_doctor_list : doctor_id, facility_id, 品目, rw_flag")
-print(f"  doctor_master  : doctor_id, experience_years, experience_cat, specialty")
-print(f"  facility_master: facility_id, facility_name, region, facility_type")
-print(f"  channel_master : channel_id, channel_name, channel_category")
+print(f"  rw_list        : doc, doc_name, fac_honin, fac_honin_name, fac, fac_name, seg")
+print(f"  sales          : 日付, 施設（本院に合算）コード, DCF施設コード, 品目コード, 実績")
+print(f"  デジタル視聴    : 活動日_dt, 品目コード, 活動種別, 活動種別コード, dcf_fac, fac_honin, fac, dcf_doc, doc, doc_name")
+print(f"  活動データ      : 活動日_dt, 品目コード, 活動種別コード, 活動種別, dcf_fac, fac_honin, fac, dcf_doc, doc")

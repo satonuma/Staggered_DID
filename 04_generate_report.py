@@ -37,10 +37,19 @@ for _font in ["Yu Gothic", "MS Gothic", "Meiryo", "Hiragino Sans", "IPAexGothic"
         pass
 matplotlib.rcParams["axes.unicode_minus"] = False
 
+# === データファイル・カラム設定 (02/03と同一) ===
+ENT_PRODUCT_CODE = "00001"
+CONTENT_TYPES = ["Webinar", "e-contents", "web講演会"]
+ACTIVITY_CHANNEL_FILTER = "web講演会"
+
+FILE_RW_LIST = "rw_list.csv"
+FILE_SALES = "sales.csv"
+FILE_DIGITAL = "デジタル視聴データ.csv"
+FILE_ACTIVITY = "活動データ.csv"
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
-_required = ["delivery_data.csv", "viewing_logs.csv", "rw_doctor_list.csv", "facility_master.csv",
-             "channel_master.csv", "doctor_master.csv"]
+_required = [FILE_SALES, FILE_DIGITAL, FILE_ACTIVITY, FILE_RW_LIST]
 _data_ok = all(os.path.exists(os.path.join(DATA_DIR, f)) for f in _required)
 if not _data_ok:
     _alt = os.path.join(SCRIPT_DIR, "data2")
@@ -79,43 +88,66 @@ def png_to_base64(filepath):
 
 
 # ================================================================
-# データ読み込み
+# データ読み込み (本番形式)
 # ================================================================
 print("=" * 60)
 print(" HTMLレポート生成")
 print("=" * 60)
 
 print("\n[データ読み込み]")
-daily_raw = pd.read_csv(os.path.join(DATA_DIR, "delivery_data.csv"))
-viewing_raw = pd.read_csv(os.path.join(DATA_DIR, "viewing_logs.csv"))
-rw_list = pd.read_csv(os.path.join(DATA_DIR, "rw_doctor_list.csv"))
-facility_master = pd.read_csv(os.path.join(DATA_DIR, "facility_master.csv"))
-channel_master = pd.read_csv(os.path.join(DATA_DIR, "channel_master.csv"))
-doctor_attr_master = pd.read_csv(os.path.join(DATA_DIR, "doctor_master.csv"))
 
-n_daily_all = len(daily_raw)
-daily = daily_raw[daily_raw["品目"] == "ENT"].copy()
-
+# 1. RW医師リスト
+rw_list = pd.read_csv(os.path.join(DATA_DIR, FILE_RW_LIST))
 n_rw_all = len(rw_list)
-doctor_master = rw_list[
-    (rw_list["品目"] == "ENT")
-    & (rw_list["rw_flag"].notna())
-    & (rw_list["rw_flag"] != "")
+doctor_master = rw_list[rw_list["seg"].notna() & (rw_list["seg"] != "")].copy()
+doctor_master = doctor_master.rename(columns={"fac_honin": "facility_id", "doc": "doctor_id"})
+
+# 2. 売上データ (日付・実績・品目コードが文字列)
+sales_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_SALES), dtype=str)
+sales_raw["実績"] = pd.to_numeric(sales_raw["実績"], errors="coerce").fillna(0)
+sales_raw["日付"] = pd.to_datetime(sales_raw["日付"], format="mixed")
+n_sales_all = len(sales_raw)
+daily = sales_raw[sales_raw["品目コード"].str.strip() == ENT_PRODUCT_CODE].copy()
+daily = daily.rename(columns={
+    "日付": "delivery_date",
+    "施設（本院に合算）コード": "facility_id",
+    "実績": "amount",
+})
+
+# 3. デジタル視聴データ
+digital = pd.read_csv(os.path.join(DATA_DIR, FILE_DIGITAL))
+n_digital_all = len(digital)
+digital["品目コード"] = digital["品目コード"].astype(str).str.strip().str.zfill(5)
+digital = digital[digital["品目コード"] == ENT_PRODUCT_CODE].copy()
+
+# 4. 活動データ → web講演会のみ抽出
+activity = pd.read_csv(os.path.join(DATA_DIR, FILE_ACTIVITY))
+n_activity_all = len(activity)
+activity["品目コード"] = activity["品目コード"].astype(str).str.strip().str.zfill(5)
+web_lecture = activity[
+    (activity["品目コード"] == ENT_PRODUCT_CODE)
+    & (activity["活動種別"] == ACTIVITY_CHANNEL_FILTER)
 ].copy()
 
-# 視聴ログにチャネル大分類を結合し、「その他」を除外
-n_viewing_all = len(viewing_raw)
-viewing_with_cat = viewing_raw.merge(channel_master[["channel_id", "channel_category"]], on="channel_id", how="left")
-viewing = viewing_with_cat[viewing_with_cat["channel_category"] != "その他"].copy()
+# 5. 視聴データ結合 (デジタル + web講演会)
+common_cols = ["活動日_dt", "品目コード", "活動種別", "活動種別コード", "fac_honin", "doc"]
+viewing = pd.concat([digital[common_cols], web_lecture[common_cols]], ignore_index=True)
+n_viewing_combined = len(viewing)
+viewing = viewing.rename(columns={
+    "活動日_dt": "view_date",
+    "fac_honin": "facility_id",
+    "doc": "doctor_id",
+    "活動種別": "channel_category",
+})
+viewing["view_date"] = pd.to_datetime(viewing["view_date"], format="mixed")
 
 daily["delivery_date"] = pd.to_datetime(daily["delivery_date"])
-viewing["view_date"] = pd.to_datetime(viewing["view_date"])
 months = pd.date_range(start=START_DATE, periods=N_MONTHS, freq="MS")
 
-print(f"  納入データ: {n_daily_all:,} 行 → ENT品目: {len(daily):,} 行")
-print(f"  RW医師リスト: {n_rw_all} 行 → ENT+RW: {len(doctor_master)} 行")
-print(f"  視聴ログ: {n_viewing_all:,} 行 → その他除外: {len(viewing):,} 行")
-print(f"  チャネルマスタ: {len(channel_master)} チャネル")
+print(f"  売上データ: {n_sales_all:,} 行 → ENT品目: {len(daily):,} 行")
+print(f"  RW医師リスト: {n_rw_all} 行 → seg非空: {len(doctor_master)} 行")
+print(f"  デジタル視聴: {n_digital_all:,} 行, 活動データ: {n_activity_all:,} 行")
+print(f"  視聴データ結合 (ENT, web講演会抽出): {n_viewing_combined:,} 行")
 
 # JSON結果読み込み
 print("\n[JSON結果読み込み]")
@@ -190,7 +222,7 @@ def create_consort_diagram(flow):
     ax.set_xlim(0, 10)
     ax.set_ylim(0, 20)
     ax.axis("off")
-    fig.suptitle("CONSORT フロー図: 解析対象選定", fontsize=14, fontweight="bold", y=0.98)
+    fig.suptitle("解析対象集団の選定", fontsize=14, fontweight="bold", y=0.98)
 
     def draw_box(ax, x, y, w, h, text, color="#E8F4FD", edge="#2196F3"):
         box = FancyBboxPatch((x - w/2, y - h/2), w, h,
@@ -215,7 +247,7 @@ def create_consort_diagram(flow):
                      arrowprops=dict(arrowstyle="-|>", color="#E53935", lw=1.2, ls="--"))
 
     # Data from flow
-    n_daily_all = flow.get("total_delivery_rows", 0)
+    n_sales_all = flow.get("total_delivery_rows", 0)
     n_ent_rows = flow.get("ent_delivery_rows", 0)
     n_rw_all = flow.get("total_rw_list", 0)
     n_ent_rw = flow.get("ent_rw_doctors", 0)
@@ -237,35 +269,35 @@ def create_consort_diagram(flow):
     ex = 8.0  # x for exclusion boxes
     sp = 1.45  # vertical spacing
 
-    # Step 0a: 全品目納入データ → ENT品目のみ
+    # Step 0a: 全品目売上データ → ENT品目のみ
     y = 19.0
     draw_box(ax, cx, y, 4.2, 0.9,
-             f"全品目納入データ\n{n_daily_all:,} 行")
+             f"全品目売上データ\n{n_sales_all:,} 行")
     draw_arrow(ax, cx, y - 0.45, cx, y - sp + 0.45)
     y -= sp
     draw_box(ax, cx, y, 4.2, 0.9,
-             f"ENT品目の納入データ\n{n_ent_rows:,} 行")
+             f"ENT品目の売上データ\n{n_ent_rows:,} 行")
     draw_arrow_right(ax, cx + 2.1, y, ex - 1.5, y)
     draw_excluded(ax, ex, y, 2.8, 0.7,
-                  f"他品目\n{n_daily_all - n_ent_rows:,} 行除外")
+                  f"他品目\n{n_sales_all - n_ent_rows:,} 行除外")
 
-    # Step 0b: 全医師リスト → ENT & RWフラグ医師
+    # Step 0b: RW医師リスト → seg非空の医師
     draw_arrow(ax, cx, y - 0.45, cx, y - sp + 0.45)
     y -= sp
     draw_box(ax, cx, y, 4.2, 0.9,
-             f"ENT & RWフラグ医師\n{n_ent_rw} 行 / {total_facs}施設 / {total_docs}医師")
+             f"RW対象医師 (seg非空)\n{n_ent_rw} 行 / {total_facs}施設 / {total_docs}医師")
     draw_arrow_right(ax, cx + 2.1, y, ex - 1.5, y)
     draw_excluded(ax, ex, y, 2.8, 0.7,
-                  f"非ENT/非RW\n{n_rw_all - n_ent_rw} 行除外")
+                  f"seg空欄\n{n_rw_all - n_ent_rw} 行除外")
 
-    # Step 0c: 視聴ログフィルタ (その他チャネル除外)
+    # Step 0c: 視聴データ結合 (デジタル + web講演会)
     draw_arrow(ax, cx, y - 0.45, cx, y - sp + 0.45)
     y -= sp
     draw_box(ax, cx, y, 4.2, 0.9,
-             f"視聴ログ (その他除外)\n{n_view_after:,} 行")
+             f"視聴データ結合\n(デジタル+web講演会)\n{n_view_after:,} 行")
     draw_arrow_right(ax, cx + 2.1, y, ex - 1.5, y)
     draw_excluded(ax, ex, y, 2.8, 0.7,
-                  f"その他チャネル\n{n_view_all - n_view_after:,} 行除外")
+                  f"他品目/その他活動\n{n_view_all - n_view_after:,} 行除外")
 
     # Step 1: 1施設複数医師除外
     draw_arrow(ax, cx, y - 0.45, cx, y - sp + 0.45)
@@ -440,6 +472,41 @@ viewing_fig = create_viewing_patterns_figure(
 )
 viewing_b64 = fig_to_base64(viewing_fig, dpi=130)
 print("  視聴パターン図生成完了")
+
+
+# ================================================================
+# コホート分布グラフ生成
+# ================================================================
+print("\n[コホート分布グラフ生成]")
+
+def create_cohort_distribution_figure(cohort_dist):
+    """コホート分布（初回視聴月ごとの施設数）をバーチャートで可視化"""
+    labels = list(cohort_dist.keys())
+    values = list(cohort_dist.values())
+
+    fig, ax = plt.subplots(figsize=(10, 4))
+    bars = ax.bar(range(len(labels)), values, color="#1565C0", alpha=0.85, edgecolor="white")
+
+    # 棒の上に数値ラベル
+    for bar, v in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.15,
+                str(v), ha="center", va="bottom", fontsize=9, fontweight="bold")
+
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right", fontsize=8)
+    ax.set_ylabel("施設数", fontsize=10)
+    ax.set_title("コホート分布: 処置群の初回視聴月ごとの施設数", fontsize=12, fontweight="bold")
+    ax.set_ylim(0, max(values) * 1.25)
+    ax.grid(True, alpha=0.2, axis="y")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+
+    plt.tight_layout()
+    return fig
+
+cohort_dist_fig = create_cohort_distribution_figure(did_results["cohort_distribution"])
+cohort_dist_b64 = fig_to_base64(cohort_dist_fig, dpi=130)
+print("  コホート分布グラフ生成完了")
 
 
 # ================================================================
@@ -642,7 +709,7 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 <nav>
   <div class="container">
     <a href="#sec1">1. 分析要件</a>
-    <a href="#sec2">2. CONSORTフロー</a>
+    <a href="#sec2">2. 解析対象集団の選定</a>
     <a href="#sec3">3. 基礎集計</a>
     <a href="#sec4">4. 視聴パターン</a>
     <a href="#sec5">5. DID推定結果</a>
@@ -660,57 +727,51 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 <h2>1. 分析要件定義</h2>
 
 <h3>1.1 分析目的</h3>
-<p>デジタルコンテンツ（Webinar, e-contents, web講演会）の視聴が、施設の医薬品納入額に与える因果効果を推定する。視聴開始時期が施設ごとに異なる「ずれた処置（staggered treatment）」に対応したDID推定量を使用する。</p>
-<p style="margin-top:8px;">分析対象は <strong>品目=ENT</strong> の納入データに限定し、医師は <strong>RWフラグ（リアルワールド対象）</strong> が付与されたENT医師のみを使用する。</p>
+<p>デジタルコンテンツ（Webinar, e-contents, web講演会）の視聴が、品目コード={{ ent_product_code }}<の納入額に与える因果効果を推定する。視聴開始時期が施設医師ごとに異なる「ずれた処置（staggered treatment）」に対応したDID推定量を使用する。</p>
+<p style="margin-top:8px;">分析対象は <strong>品目コード={{ ent_product_code }}</strong> (ENT) の売上データに限定し、医師は <strong>RW医師</strong> のみを使用する。</p>
 
 <h3>1.2 データ構造</h3>
 <div class="param-grid">
   <div class="param-box">
-    <h4>納入データ (delivery_data.csv)</h4>
+    <h4>売上データ (sales.csv)</h4>
     <ul>
-      <li>日別・施設別・品目別の納入額</li>
-      <li>カラム: delivery_date, facility_id, 品目, amount</li>
-      <li>全品目: {{ n_delivery_all_rows }} 行 → ENT品目: {{ n_delivery_rows }} 行</li>
+      <li>日別・施設別・品目別の売上実績</li>
+      <li>カラム: 日付, 施設（本院に合算）コード, DCF施設コード, 品目コード, 実績</li>
+      <li>日付: YYYYMMDD文字列、実績: 数値文字列</li>
+      <li>全品目: {{ n_sales_all_rows }} 行 → ENT品目: {{ n_sales_rows }} 行</li>
     </ul>
   </div>
   <div class="param-box">
-    <h4>視聴ログ (viewing_logs.csv)</h4>
+    <h4>デジタル視聴データ (デジタル視聴データ.csv)</h4>
     <ul>
-      <li>日別・医師別の視聴記録 (channel_id付き)</li>
-      <li>channel_masterで大分類に変換後、「その他」を除外</li>
-      <li>全体: {{ n_viewing_all_rows }} 行 → その他除外: {{ n_viewing_rows }} 行</li>
+      <li>Webinar / e-contents の視聴ログ</li>
+      <li>カラム: 活動日_dt, 品目コード, 活動種別, 活動種別コード, fac_honin, doc 等</li>
+      <li>{{ n_digital_all_rows }} 行</li>
     </ul>
   </div>
   <div class="param-box">
-    <h4>チャネルマスタ (channel_master.csv)</h4>
+    <h4>活動データ (活動データ.csv)</h4>
     <ul>
-      <li>カラム: channel_id, channel_name, channel_category</li>
-      <li>大分類: Webinar, web講演会, e-contents, その他</li>
-      <li>{{ n_channel_rows }} チャネル</li>
+      <li>MR入力の活動記録 (web講演会を含む)</li>
+      <li>カラム: 活動日_dt, 品目コード, 活動種別コード, 活動種別, fac_honin, doc 等</li>
+      <li>{{ n_activity_all_rows }} 行 → web講演会抽出後に視聴データと結合</li>
     </ul>
   </div>
   <div class="param-box">
-    <h4>RW医師リスト (rw_doctor_list.csv)</h4>
+    <h4>RW医師リスト (rw_list.csv)</h4>
     <ul>
-      <li>カラム: doctor_id, facility_id, 品目, rw_flag</li>
-      <li>全体: {{ n_rw_all_rows }} 行 → ENT+RW: {{ n_doctor_rows }} 行</li>
+      <li>ENT対象医師リスト (品目カラムなし)</li>
+      <li>カラム: doc, doc_name, fac_honin, fac_honin_name, fac, fac_name, seg</li>
+      <li>seg非空 = RW対象</li>
+      <li>全体: {{ n_rw_all_rows }} 行 → seg非空: {{ n_doctor_rows }} 行</li>
     </ul>
   </div>
-  <div class="param-box">
-    <h4>医師マスタ (doctor_master.csv)</h4>
-    <ul>
-      <li>カラム: doctor_id, experience_years, experience_cat, specialty</li>
-      <li>{{ n_doctor_master_rows }} 行</li>
-    </ul>
-  </div>
-  <div class="param-box">
-    <h4>施設マスター (facility_master.csv)</h4>
-    <ul>
-      <li>カラム: facility_id, facility_name, region, facility_type</li>
-      <li>1施設に複数医師が所属する場合あり</li>
-      <li>{{ n_facility_rows }} 行</li>
-    </ul>
-  </div>
+</div>
+
+<div class="highlight-box">
+  <strong>視聴データの結合:</strong>
+  デジタル視聴データ (Webinar + e-contents) と 活動データ (web講演会のみ抽出) を結合して分析用の視聴データとする。
+  結合後: {{ n_viewing_combined_rows }} 行
 </div>
 
 <h3>1.3 分析パラメータ</h3>
@@ -726,9 +787,9 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   <div class="param-box">
     <h4>除外基準</h4>
     <ul>
-      <li>納入データ: ENT品目以外を除外</li>
-      <li>医師リスト: 非ENT品目 / RWフラグなしを除外</li>
-      <li>視聴ログ: チャネルマスタで大分類変換後、「その他」カテゴリを除外</li>
+      <li>売上データ: ENT品目コード ({{ ent_product_code }}) 以外を除外</li>
+      <li>医師リスト: seg列が空欄の医師を除外</li>
+      <li>視聴データ: ENT品目 + 対象チャネル (Webinar, e-contents, web講演会) のみ</li>
       <li>1施設に複数医師が所属 → 施設除外</li>
       <li>1医師が複数施設に所属 → 医師除外</li>
       <li>wash-out期間に視聴あり → 除外</li>
@@ -772,19 +833,19 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   <tr><td>SE (標準誤差)</td><td>推定値のばらつきの大きさ、小さいほど推定が安定</td></tr>
   <tr><td>p値</td><td>帰無仮説（効果ゼロ）が正しい場合にこの推定値以上が観測される確率</td></tr>
   <tr><td>クラスターロバストSE</td><td>施設内の観測値の相関を考慮した標準誤差の補正</td></tr>
-  <tr><td>CONSORTフロー図</td><td>臨床研究で標準的に用いられる、解析対象選定過程の図示</td></tr>
-  <tr><td>modifier</td><td>DGP（データ生成過程）で処置効果に乗算的に作用する属性別の係数</td></tr>
+  <tr><td>解析対象集団の選定フロー</td><td>データソースから段階的な除外基準を適用して最終解析対象を確定する過程の図示</td></tr>
+  <tr><td>fac_honin (施設本院コード)</td><td>本院に合算したコードで、分析の施設単位として使用</td></tr>
 </table>
 </section>
 
 <!-- ============================================================ -->
-<!-- Section 2: CONSORT フロー図 -->
+<!-- Section 2: 解析対象集団の選定 -->
 <!-- ============================================================ -->
 <section id="sec2">
-<h2>2. CONSORT フロー図</h2>
-<p>臨床研究の標準形式（CONSORT）に準じて、解析対象の選定フローを示す。</p>
+<h2>2. 解析対象集団の選定</h2>
+<p>解析対象集団の選定フローを以下に示す。売上データ・RW医師リスト・視聴データの各ソースからENT品目を抽出し、施設-医師の1対1対応・wash-out・遅延視聴者の除外を経て、最終的な処置群・対照群を確定した。</p>
 <div class="img-container">
-  <img src="data:image/png;base64,{{ consort_b64 }}" alt="CONSORT フロー図">
+  <img src="data:image/png;base64,{{ consort_b64 }}" alt="解析対象集団の選定">
 </div>
 
 <h3>除外フロー集計</h3>
@@ -797,25 +858,25 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   </tr>
   <tr>
     <td>初期</td>
-    <td>全品目納入データ</td>
+    <td>全品目売上データ</td>
     <td>-</td>
     <td>{{ flow.total_delivery_rows }} 行</td>
   </tr>
   <tr>
     <td>[0a] ENT品目フィルタ</td>
-    <td>品目 = ENT のみ</td>
+    <td>品目コード = {{ ent_product_code }} のみ</td>
     <td>{{ flow.total_delivery_rows - flow.ent_delivery_rows }} 行</td>
     <td>{{ flow.ent_delivery_rows }} 行</td>
   </tr>
   <tr>
-    <td>[0b] RWフラグフィルタ</td>
-    <td>品目=ENT & RWフラグ=対象</td>
+    <td>[0b] RW医師フィルタ</td>
+    <td>rw_list.csv の seg 非空</td>
     <td>{{ flow.total_rw_list - flow.ent_rw_doctors }} 行</td>
     <td>{{ flow.ent_rw_doctors }} 行 ({{ flow.total_facilities }}施設 / {{ flow.total_doctors }}医師)</td>
   </tr>
   <tr>
-    <td>[0c] 視聴ログフィルタ</td>
-    <td>チャネルマスタ結合、「その他」除外</td>
+    <td>[0c] 視聴データ結合</td>
+    <td>デジタル視聴 + 活動(web講演会) ENT品目</td>
     <td>{{ flow.total_viewing_rows - flow.viewing_after_filter }} 行</td>
     <td>{{ flow.viewing_after_filter }} 行</td>
   </tr>
@@ -863,8 +924,8 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   <tr>
     <th>群</th>
     <th>施設数</th>
-    <th>月次納入額 平均</th>
-    <th>月次納入額 SD</th>
+    <th>月次売上額 平均</th>
+    <th>月次売上額 SD</th>
     <th>パネル行数</th>
   </tr>
   <tr>
@@ -885,20 +946,9 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 
 <h3>3.2 コホート分布</h3>
 <p>処置群の初回視聴月ごとの施設数分布:</p>
-<table>
-  <tr>
-    <th>初回視聴月</th>
-    {% for ym in cohort_dist %}
-    <th>{{ ym }}</th>
-    {% endfor %}
-  </tr>
-  <tr>
-    <td>施設数</td>
-    {% for ym, cnt in cohort_dist.items() %}
-    <td>{{ cnt }}</td>
-    {% endfor %}
-  </tr>
-</table>
+<div class="img-container">
+  <img src="data:image/png;base64,{{ cohort_dist_b64 }}" alt="コホート分布">
+</div>
 
 {% if attr_dist %}
 <h3>3.3 属性分布 (処置群 / 対照群)</h3>
@@ -1021,13 +1071,63 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 <p>staggered_did_results.png が見つかりません。</p>
 {% endif %}
 
+{% if twfe_robust %}
+<h3>5.4 ロバストネスチェック: MR活動共変量</h3>
+<p>MR活動（面談、面談_アポ、説明会等）の月次実施回数を共変量として追加した場合の推定結果。
+デジタル視聴の効果推定がMR活動の時変交絡に頑健かどうかを検証する。</p>
+
+<table>
+  <tr>
+    <th>モデル</th>
+    <th>ATT</th>
+    <th>SE</th>
+    <th>p値</th>
+    <th>95% CI</th>
+    <th>有意性</th>
+  </tr>
+  <tr>
+    <td>TWFE (メイン)</td>
+    <td>{{ "%.2f"|format(twfe.att) }}</td>
+    <td>{{ "%.2f"|format(twfe.se) }}</td>
+    <td>{{ "%.6f"|format(twfe.p) }}</td>
+    <td>[{{ "%.2f"|format(twfe.ci_lo) }}, {{ "%.2f"|format(twfe.ci_hi) }}]</td>
+    <td class="{{ 'sig' if twfe.sig != 'n.s.' else 'ns' }}">{{ twfe.sig }}</td>
+  </tr>
+  <tr>
+    <td>TWFE (+MR活動共変量)</td>
+    <td>{{ "%.2f"|format(twfe_robust.att) }}</td>
+    <td>{{ "%.2f"|format(twfe_robust.se) }}</td>
+    <td>{{ "%.6f"|format(twfe_robust.p) }}</td>
+    <td>[{{ "%.2f"|format(twfe_robust.ci_lo) }}, {{ "%.2f"|format(twfe_robust.ci_hi) }}]</td>
+    <td class="{{ 'sig' if twfe_robust.sig != 'n.s.' else 'ns' }}">{{ twfe_robust.sig }}</td>
+  </tr>
+</table>
+
+<table>
+  <tr>
+    <th>共変量</th>
+    <th>係数</th>
+    <th>SE</th>
+    <th>p値</th>
+    <th>有意性</th>
+  </tr>
+  <tr>
+    <td>MR活動回数</td>
+    <td>{{ "%.2f"|format(twfe_robust.mr_activity_coef) }}</td>
+    <td>{{ "%.2f"|format(twfe_robust.mr_activity_se) }}</td>
+    <td>{{ "%.4f"|format(twfe_robust.mr_activity_p) }}</td>
+    <td class="{{ 'sig' if twfe_robust.mr_activity_sig != 'n.s.' else 'ns' }}">{{ twfe_robust.mr_activity_sig }}</td>
+  </tr>
+</table>
+
+<p style="margin-top:8px;">ATT変化率: <strong>{{ "%.1f"|format(twfe_robust.att_change_pct) }}%</strong></p>
+
 <div class="highlight-box">
-  <strong>DGPの真の効果:</strong>
-  Webinar: 18, e-contents: 10, web講演会: 22 /
-  月次成長: +1.0/月 (視聴継続中) /
-  停止後減衰: -1.5/月 (猶予2ヶ月) /
-  属性modifierによる異質性あり
+  <strong>解釈:</strong>
+  MR活動（面談等）を共変量として追加してもATTの変化が小さい場合（目安: 変化率10%未満）、
+  MR活動による時変交絡の影響は限定的であり、メインTWFE推定の信頼性が支持される。
 </div>
+{% endif %}
 </section>
 
 <!-- ============================================================ -->
@@ -1046,7 +1146,9 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
     <th>ATT</th>
     <th>SE</th>
     <th>95% CI</th>
+    {% if true_mods and dim.name in true_mods %}
     <th>DGP modifier</th>
+    {% endif %}
   </tr>
   {% for level in dim.levels %}
   {% set r = cate[dim.name][level] %}
@@ -1060,7 +1162,9 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
     {% else %}
     <td>N/A</td><td>N/A</td><td>N/A</td>
     {% endif %}
+    {% if true_mods and dim.name in true_mods %}
     <td>{{ true_mods.get(dim.name, {}).get(level, "N/A") }}</td>
+    {% endif %}
   </tr>
   {% endfor %}
 </table>
@@ -1150,7 +1254,6 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   <strong>注意事項:</strong><br>
   - サブグループのNが小さいため検出力は限定的<br>
   - 各サブグループのATTは共通の対照群を使用<br>
-  - DGPの真の効果はmodifier乗算型 → 基本効果が大きいほどサブグループ差が拡大<br>
   - 本分析はシミュレーションデータに基づく方法論検証
 </div>
 </section>
@@ -1196,15 +1299,14 @@ for dim_name, diffs in cate_results.get("diff_tests", {}).items():
 
 template_data = {
     # 基本情報
-    "n_delivery_all_rows": f"{n_daily_all:,}",
-    "n_delivery_rows": f"{len(daily):,}",
-    "n_viewing_all_rows": f"{n_viewing_all:,}",
-    "n_viewing_rows": f"{len(viewing):,}",
+    "ent_product_code": ENT_PRODUCT_CODE,
+    "n_sales_all_rows": f"{n_sales_all:,}",
+    "n_sales_rows": f"{len(daily):,}",
+    "n_digital_all_rows": f"{n_digital_all:,}",
+    "n_activity_all_rows": f"{n_activity_all:,}",
+    "n_viewing_combined_rows": f"{n_viewing_combined:,}",
     "n_rw_all_rows": f"{n_rw_all:,}",
     "n_doctor_rows": f"{len(doctor_master):,}",
-    "n_doctor_master_rows": f"{len(doctor_attr_master):,}",
-    "n_facility_rows": f"{len(facility_master):,}",
-    "n_channel_rows": f"{len(channel_master):,}",
 
     # 除外フロー
     "flow": DotDict(did_results["exclusion_flow"]),
@@ -1215,9 +1317,6 @@ template_data = {
         "control": DotDict(did_results["descriptive_stats"]["control"]),
         "treated": DotDict(did_results["descriptive_stats"]["treated"]),
     }),
-
-    # コホート分布
-    "cohort_dist": did_results["cohort_distribution"],
 
     # 属性分布
     "attr_dist": {
@@ -1230,6 +1329,7 @@ template_data = {
 
     # TWFE/CS結果
     "twfe": DotDict(did_results["twfe"]),
+    "twfe_robust": DotDict(did_results["twfe_robust"]) if "twfe_robust" in did_results else None,
     "cs": DotDict(did_results["cs_overall"]),
 
     # チャネル別
@@ -1244,6 +1344,7 @@ template_data = {
     # 画像
     "consort_b64": consort_b64,
     "viewing_b64": viewing_b64,
+    "cohort_dist_b64": cohort_dist_b64,
     "png_did": existing_pngs.get("staggered_did_results.png", ""),
     "png_cate": existing_pngs.get("cate_results.png", ""),
     "png_cate_dyn": existing_pngs.get("cate_dynamic_effects.png", ""),

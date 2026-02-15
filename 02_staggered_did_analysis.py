@@ -3,7 +3,7 @@
 Staggered DID分析: デジタルコンテンツ視聴の効果検証
 ===================================================================
 手順:
-  1. 日別施設別の納入データ + 視聴ログ + マスター読み込み
+  1. 本番形式データ読み込み (sales, デジタル視聴, 活動, rw_list)
   2. 除外フロー:
      a. 1施設複数医師 → 除外
      b. 1医師複数施設 → 除外
@@ -34,11 +34,21 @@ for _font in ["Yu Gothic", "MS Gothic", "Meiryo", "Hiragino Sans", "IPAexGothic"
         pass
 matplotlib.rcParams["axes.unicode_minus"] = False
 
+# === データファイル・カラム設定 ===
+ENT_PRODUCT_CODE = "00001"              # ENT品目コード (5桁文字列、パラメータ)
+CONTENT_TYPES = ["Webinar", "e-contents", "web講演会"]  # チャネル大分類 (拡張可能)
+ACTIVITY_CHANNEL_FILTER = "web講演会"   # 活動データから抽出する活動種別
+
+# ファイル名
+FILE_RW_LIST = "rw_list.csv"
+FILE_SALES = "sales.csv"
+FILE_DIGITAL = "デジタル視聴データ.csv"
+FILE_ACTIVITY = "活動データ.csv"
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
 # data/ の整合性チェック → data2/ にフォールバック
-_required = ["delivery_data.csv", "viewing_logs.csv", "rw_doctor_list.csv", "facility_master.csv",
-             "channel_master.csv", "doctor_master.csv"]
+_required = [FILE_SALES, FILE_DIGITAL, FILE_ACTIVITY, FILE_RW_LIST]
 _data_ok = all(os.path.exists(os.path.join(DATA_DIR, f)) for f in _required)
 if not _data_ok:
     _alt = os.path.join(SCRIPT_DIR, "data2")
@@ -50,7 +60,6 @@ N_MONTHS = 33
 WASHOUT_MONTHS = 2
 LAST_ELIGIBLE_MONTH = 29
 MIN_ET, MAX_ET = -6, 18
-CONTENT_TYPES = ["Webinar", "e-contents", "web講演会"]
 
 
 # ================================================================
@@ -172,44 +181,66 @@ def run_cs_with_bootstrap(panel, n_boot=200, label=""):
 
 
 # ================================================================
-# Part 1: データ読み込み
+# Part 1: データ読み込み (本番形式)
 # ================================================================
 print("=" * 70)
 print(" Staggered DID分析: デジタルコンテンツ視聴の効果検証")
 print("=" * 70)
 
-daily_raw = pd.read_csv(os.path.join(DATA_DIR, "delivery_data.csv"))
-viewing_raw = pd.read_csv(os.path.join(DATA_DIR, "viewing_logs.csv"))
-rw_list = pd.read_csv(os.path.join(DATA_DIR, "rw_doctor_list.csv"))
-channel_master = pd.read_csv(os.path.join(DATA_DIR, "channel_master.csv"))
-
-n_daily_all = len(daily_raw)
-daily = daily_raw[daily_raw["品目"] == "ENT"].copy()
-
+# 1. RW医師リスト
+rw_list = pd.read_csv(os.path.join(DATA_DIR, FILE_RW_LIST))
 n_rw_all = len(rw_list)
-doctor_master = rw_list[
-    (rw_list["品目"] == "ENT")
-    & (rw_list["rw_flag"].notna())
-    & (rw_list["rw_flag"] != "")
+doctor_master = rw_list[rw_list["seg"].notna() & (rw_list["seg"] != "")].copy()
+doctor_master = doctor_master.rename(columns={"fac_honin": "facility_id", "doc": "doctor_id"})
+
+# 2. 売上データ (日付・実績・品目コードが文字列)
+sales_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_SALES), dtype=str)
+sales_raw["実績"] = pd.to_numeric(sales_raw["実績"], errors="coerce").fillna(0)
+sales_raw["日付"] = pd.to_datetime(sales_raw["日付"], format="mixed")
+n_sales_all = len(sales_raw)
+daily = sales_raw[sales_raw["品目コード"].str.strip() == ENT_PRODUCT_CODE].copy()
+daily = daily.rename(columns={
+    "日付": "delivery_date",
+    "施設（本院に合算）コード": "facility_id",
+    "実績": "amount",
+})
+
+# 3. デジタル視聴データ
+digital_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_DIGITAL))
+n_digital_all = len(digital_raw)
+digital_raw["品目コード"] = digital_raw["品目コード"].astype(str).str.strip().str.zfill(5)
+digital = digital_raw[digital_raw["品目コード"] == ENT_PRODUCT_CODE].copy()
+
+# 4. 活動データ → web講演会のみ抽出
+activity_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_ACTIVITY))
+n_activity_all = len(activity_raw)
+activity_raw["品目コード"] = activity_raw["品目コード"].astype(str).str.strip().str.zfill(5)
+web_lecture = activity_raw[
+    (activity_raw["品目コード"] == ENT_PRODUCT_CODE)
+    & (activity_raw["活動種別"] == ACTIVITY_CHANNEL_FILTER)
 ].copy()
 
-# 視聴ログにチャネル大分類を結合し、「その他」を除外
-n_viewing_all = len(viewing_raw)
-viewing_with_cat = viewing_raw.merge(channel_master[["channel_id", "channel_category"]], on="channel_id", how="left")
-viewing = viewing_with_cat[viewing_with_cat["channel_category"] != "その他"].copy()
+# 5. 視聴データ結合 (デジタル + 活動web講演会)
+common_cols = ["活動日_dt", "品目コード", "活動種別", "活動種別コード", "fac_honin", "doc"]
+viewing = pd.concat([digital[common_cols], web_lecture[common_cols]], ignore_index=True)
+viewing = viewing.rename(columns={
+    "活動日_dt": "view_date",
+    "fac_honin": "facility_id",
+    "doc": "doctor_id",
+    "活動種別": "channel_category",
+})
+viewing["view_date"] = pd.to_datetime(viewing["view_date"], format="mixed")
 
-daily["delivery_date"] = pd.to_datetime(daily["delivery_date"])
-viewing["view_date"] = pd.to_datetime(viewing["view_date"])
 months = pd.date_range(start=START_DATE, periods=N_MONTHS, freq="MS")
 
 print(f"\n[元データ]")
-print(f"  納入データ(全品目)      : {n_daily_all:,} 行")
-print(f"  納入データ(ENT品目)     : {len(daily):,} 行  (他品目 {n_daily_all - len(daily):,} 行除外)")
+print(f"  売上データ(全品目)      : {n_sales_all:,} 行")
+print(f"  売上データ(ENT品目)     : {len(daily):,} 行  (他品目 {n_sales_all - len(daily):,} 行除外)")
 print(f"  RW医師リスト(全体)      : {n_rw_all} 行")
-print(f"  RW医師リスト(ENT+RW)    : {len(doctor_master)} 行  (非ENT/非RW {n_rw_all - len(doctor_master)} 行除外)")
-print(f"  視聴ログ(全体)          : {n_viewing_all:,} 行")
-print(f"  視聴ログ(その他除外)    : {len(viewing):,} 行  (その他 {n_viewing_all - len(viewing):,} 行除外)")
-print(f"  チャネルマスタ          : {len(channel_master)} チャネル")
+print(f"  RW医師リスト(seg非空)   : {len(doctor_master)} 行  (非RW {n_rw_all - len(doctor_master)} 行除外)")
+print(f"  デジタル視聴データ      : {n_digital_all:,} 行 → ENT品目: {len(digital):,} 行")
+print(f"  活動データ              : {n_activity_all:,} 行 → web講演会+ENT: {len(web_lecture):,} 行")
+print(f"  視聴データ結合          : {len(viewing):,} 行")
 print(f"  観測期間 : {months[0].strftime('%Y-%m')} ~ {months[-1].strftime('%Y-%m')} ({N_MONTHS}ヶ月)")
 
 # ================================================================
@@ -415,6 +446,88 @@ print(f"\n  DID推定量 : {beta:.2f}")
 print(f"  SE        : {se_twfe:.2f}")
 print(f"  p値       : {pval_twfe:.6f} {sig_twfe}")
 print(f"  95%CI     : [{ci_twfe[0]:.2f}, {ci_twfe[1]:.2f}]")
+
+# ================================================================
+# Part 5b: ロバストネスチェック — MR活動共変量
+# ================================================================
+print("\n" + "=" * 70)
+print(" Part 5b: ロバストネスチェック (MR活動共変量)")
+print("=" * 70)
+
+# 1. 活動データから非デジタル活動 (面談, 面談_アポ, 説明会, その他) を抽出
+#    CONTENT_TYPES (Webinar, e-contents, web講演会) は処置変数 → 除外
+mr_activity = activity_raw[
+    (activity_raw["品目コード"] == ENT_PRODUCT_CODE)
+    & (~activity_raw["活動種別"].isin(CONTENT_TYPES))
+].copy()
+
+# 2. 施設×月次で集計
+mr_activity = mr_activity.rename(columns={"fac_honin": "mr_facility_id"})
+mr_activity["活動日_dt"] = pd.to_datetime(mr_activity["活動日_dt"], format="mixed")
+mr_activity["month_index"] = (
+    (mr_activity["活動日_dt"].dt.year - 2023) * 12
+    + mr_activity["活動日_dt"].dt.month - 4
+)
+mr_counts = (
+    mr_activity.groupby(["mr_facility_id", "month_index"])
+    .size()
+    .reset_index(name="mr_activity_count")
+)
+mr_counts = mr_counts.rename(columns={"mr_facility_id": "facility_id"})
+
+print(f"\n  MR活動レコード数 (非デジタル): {len(mr_activity):,}")
+print(f"  活動種別内訳:")
+for act_type, cnt in mr_activity["活動種別"].value_counts().items():
+    print(f"    {act_type}: {cnt:,}")
+
+# 3. パネルにマージ
+panel_robust = panel_r.merge(mr_counts, on=["facility_id", "month_index"], how="left")
+panel_robust["mr_activity_count"] = panel_robust["mr_activity_count"].fillna(0)
+
+print(f"\n  パネルへのマージ完了:")
+print(f"    MR活動ありセル: {(panel_robust['mr_activity_count'] > 0).sum():,} / {len(panel_robust):,}")
+print(f"    MR活動 平均: {panel_robust['mr_activity_count'].mean():.2f}, "
+      f"最大: {panel_robust['mr_activity_count'].max():.0f}")
+
+# 4. TWFE with MR活動共変量
+X_robust = pd.concat(
+    [pd.DataFrame({
+        "const": 1.0,
+        "did": panel_robust["did"].values,
+        "mr_activity": panel_robust["mr_activity_count"].values,
+    }), unit_dum, time_dum],
+    axis=1,
+)
+y_robust = panel_robust["amount"].values
+
+model_robust = sm.OLS(y_robust, X_robust).fit(
+    cov_type="cluster", cov_kwds={"groups": panel_robust["unit_id"].values}
+)
+
+beta_robust = model_robust.params["did"]
+se_robust = model_robust.bse["did"]
+pval_robust = model_robust.pvalues["did"]
+ci_robust = model_robust.conf_int().loc["did"]
+sig_robust = (
+    "***" if pval_robust < 0.001 else "**" if pval_robust < 0.01
+    else "*" if pval_robust < 0.05 else "n.s."
+)
+
+mr_coef = model_robust.params["mr_activity"]
+mr_se = model_robust.bse["mr_activity"]
+mr_pval = model_robust.pvalues["mr_activity"]
+mr_sig = (
+    "***" if mr_pval < 0.001 else "**" if mr_pval < 0.01
+    else "*" if mr_pval < 0.05 else "n.s."
+)
+
+att_change_pct = abs(beta_robust - beta) / abs(beta) * 100 if beta != 0 else 0.0
+
+print(f"\n  === ロバストネスチェック ===")
+print(f"  TWFE (メイン)         : ATT={beta:.2f} (SE={se_twfe:.2f}) {sig_twfe}")
+print(f"  TWFE (+MR活動共変量)  : ATT={beta_robust:.2f} (SE={se_robust:.2f}) {sig_robust}")
+print(f"  MR活動の係数          : {mr_coef:.2f} (SE={mr_se:.2f}, p={mr_pval:.4f}) {mr_sig}")
+print(f"  → ATT変化率: {att_change_pct:.1f}%")
 
 # ================================================================
 # Part 6: CS推定 (全体)
@@ -653,11 +766,11 @@ os.makedirs(results_dir, exist_ok=True)
 
 # 除外フロー情報
 exclusion_flow = {
-    "total_delivery_rows": n_daily_all,
+    "total_delivery_rows": n_sales_all,
     "ent_delivery_rows": len(daily),
     "total_rw_list": n_rw_all,
     "ent_rw_doctors": len(doctor_master),
-    "total_viewing_rows": n_viewing_all,
+    "total_viewing_rows": n_digital_all + n_activity_all,
     "viewing_after_filter": len(viewing),
     "total_doctors": len(doctor_master["doctor_id"].unique()),
     "total_facilities": len(doctor_master["facility_id"].unique()),
@@ -688,6 +801,22 @@ twfe_result = {
     "ci_lo": float(ci_twfe[0]),
     "ci_hi": float(ci_twfe[1]),
     "sig": sig_twfe,
+}
+
+# TWFEロバストネスチェック結果
+twfe_robust_result = {
+    "att": float(beta_robust),
+    "se": float(se_robust),
+    "p": float(pval_robust),
+    "ci_lo": float(ci_robust[0]),
+    "ci_hi": float(ci_robust[1]),
+    "sig": sig_robust,
+    "mr_activity_coef": float(mr_coef),
+    "mr_activity_se": float(mr_se),
+    "mr_activity_p": float(mr_pval),
+    "mr_activity_sig": mr_sig,
+    "att_change_pct": float(att_change_pct),
+    "covariates": ["mr_activity_count"],
 }
 
 # CS全体結果
@@ -741,6 +870,7 @@ did_results_json = {
     "exclusion_flow": exclusion_flow,
     "excluded_ids": excluded_ids,
     "twfe": twfe_result,
+    "twfe_robust": twfe_robust_result,
     "cs_overall": cs_result,
     "cs_channel": ch_results_json,
     "cohort_distribution": cohort_json,

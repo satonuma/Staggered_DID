@@ -2,12 +2,12 @@
 ===================================================================
 CATE分析: 属性別の異質的処置効果 (Heterogeneous Treatment Effects)
 ===================================================================
-分析次元:
-  1. 地域 (region): 都市部 / 郊外 / 地方
-  2. 施設タイプ (facility_type): 病院 / クリニック
-  3. 経験年数 (experience_cat): 若手 / 中堅 / ベテラン
-  4. 診療科 (specialty): 内科 / 外科 / その他
-  5. ベースライン納入額 (baseline_cat): 低 / 中 / 高
+基本次元:
+  - ベースライン納入額 (baseline_cat): 低 / 中 / 高
+
+オプション属性ファイルが data/ に存在すれば自動拡張:
+  - doctor_attributes.csv → experience_cat, specialty 等
+  - facility_attributes.csv → region, facility_type 等
 
 手法: CS推定量をサブグループ別に実行 + Bootstrap SE
 ===================================================================
@@ -33,11 +33,19 @@ for _font in ["Yu Gothic", "MS Gothic", "Meiryo", "Hiragino Sans", "IPAexGothic"
         pass
 matplotlib.rcParams["axes.unicode_minus"] = False
 
+# === データファイル・カラム設定 (02と同一) ===
+ENT_PRODUCT_CODE = "00001"
+CONTENT_TYPES = ["Webinar", "e-contents", "web講演会"]
+ACTIVITY_CHANNEL_FILTER = "web講演会"
+
+FILE_RW_LIST = "rw_list.csv"
+FILE_SALES = "sales.csv"
+FILE_DIGITAL = "デジタル視聴データ.csv"
+FILE_ACTIVITY = "活動データ.csv"
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(SCRIPT_DIR, "data")
-# data/ の整合性チェック → data2/ にフォールバック
-_required = ["delivery_data.csv", "viewing_logs.csv", "rw_doctor_list.csv", "facility_master.csv",
-             "channel_master.csv", "doctor_master.csv"]
+_required = [FILE_SALES, FILE_DIGITAL, FILE_ACTIVITY, FILE_RW_LIST]
 _data_ok = all(os.path.exists(os.path.join(DATA_DIR, f)) for f in _required)
 if not _data_ok:
     _alt = os.path.join(SCRIPT_DIR, "data2")
@@ -50,13 +58,30 @@ WASHOUT_MONTHS = 2
 LAST_ELIGIBLE_MONTH = 29
 MIN_ET, MAX_ET = -6, 18
 
-# DGPの真のmodifier
+# DGPの真のmodifier (サンプルデータ用。本番データでは参照されないが定義は残す)
 TRUE_MODIFIERS = {
     "region":         {"都市部": 0.75, "郊外": 1.00, "地方": 1.40},
     "facility_type":  {"病院": 0.85, "クリニック": 1.20},
     "experience_cat": {"若手": 1.30, "中堅": 1.00, "ベテラン": 0.70},
     "specialty":      {"内科": 1.15, "外科": 0.85, "その他": 1.00},
 }
+
+# 基本次元 (常に使用)
+CATE_DIMS = [
+    ("baseline_cat", ["低", "中", "高"]),
+]
+
+# オプション属性ファイル: 存在すれば読み込んでマージ
+OPTIONAL_ATTR_FILES = [
+    {"file": "doctor_attributes.csv", "key": "doc", "merge_key": "doctor_id", "dims": [
+        ("experience_cat", None),
+        ("specialty", None),
+    ]},
+    {"file": "facility_attributes.csv", "key": "fac_honin", "merge_key": "facility_id", "dims": [
+        ("region", None),
+        ("facility_type", None),
+    ]},
+]
 
 
 # ================================================================
@@ -151,52 +176,60 @@ def cs_with_bootstrap(panel, n_boot=150, label=""):
 
 
 # ================================================================
-# データ読み込み + 除外フロー
+# データ読み込み + 除外フロー (02と同一ロジック)
 # ================================================================
 print("=" * 70)
 print(" CATE分析: 属性別の異質的処置効果")
 print("=" * 70)
 
-daily_raw = pd.read_csv(os.path.join(DATA_DIR, "delivery_data.csv"))
-viewing_raw = pd.read_csv(os.path.join(DATA_DIR, "viewing_logs.csv"))
-rw_list = pd.read_csv(os.path.join(DATA_DIR, "rw_doctor_list.csv"))
-facility_master = pd.read_csv(os.path.join(DATA_DIR, "facility_master.csv"))
-channel_master = pd.read_csv(os.path.join(DATA_DIR, "channel_master.csv"))
-doctor_attr_master = pd.read_csv(os.path.join(DATA_DIR, "doctor_master.csv"))
+# 1. RW医師リスト
+rw_list = pd.read_csv(os.path.join(DATA_DIR, FILE_RW_LIST))
+doctor_master = rw_list[rw_list["seg"].notna() & (rw_list["seg"] != "")].copy()
+doctor_master = doctor_master.rename(columns={"fac_honin": "facility_id", "doc": "doctor_id"})
 
-daily = daily_raw[daily_raw["品目"] == "ENT"].copy()
-doctor_master = rw_list[
-    (rw_list["品目"] == "ENT")
-    & (rw_list["rw_flag"].notna())
-    & (rw_list["rw_flag"] != "")
+# 2. 売上データ
+sales_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_SALES), dtype=str)
+sales_raw["実績"] = pd.to_numeric(sales_raw["実績"], errors="coerce").fillna(0)
+sales_raw["日付"] = pd.to_datetime(sales_raw["日付"], format="mixed")
+daily = sales_raw[sales_raw["品目コード"].str.strip() == ENT_PRODUCT_CODE].copy()
+daily = daily.rename(columns={
+    "日付": "delivery_date",
+    "施設（本院に合算）コード": "facility_id",
+    "実績": "amount",
+})
+
+# 3. デジタル視聴データ
+digital_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_DIGITAL))
+digital_raw["品目コード"] = digital_raw["品目コード"].astype(str).str.strip().str.zfill(5)
+digital = digital_raw[digital_raw["品目コード"] == ENT_PRODUCT_CODE].copy()
+
+# 4. 活動データ → web講演会のみ
+activity_raw = pd.read_csv(os.path.join(DATA_DIR, FILE_ACTIVITY))
+activity_raw["品目コード"] = activity_raw["品目コード"].astype(str).str.strip().str.zfill(5)
+web_lecture = activity_raw[
+    (activity_raw["品目コード"] == ENT_PRODUCT_CODE)
+    & (activity_raw["活動種別"] == ACTIVITY_CHANNEL_FILTER)
 ].copy()
 
-# 視聴ログにチャネル大分類を結合し、「その他」を除外
-viewing_with_cat = viewing_raw.merge(channel_master[["channel_id", "channel_category"]], on="channel_id", how="left")
-viewing = viewing_with_cat[viewing_with_cat["channel_category"] != "その他"].copy()
+# 5. 視聴データ結合
+common_cols = ["活動日_dt", "品目コード", "活動種別", "活動種別コード", "fac_honin", "doc"]
+viewing = pd.concat([digital[common_cols], web_lecture[common_cols]], ignore_index=True)
+viewing = viewing.rename(columns={
+    "活動日_dt": "view_date",
+    "fac_honin": "facility_id",
+    "doc": "doctor_id",
+    "活動種別": "channel_category",
+})
+viewing["view_date"] = pd.to_datetime(viewing["view_date"], format="mixed")
 
-print(f"  納入データ: {len(daily_raw):,} 行 → ENT品目: {len(daily):,} 行")
-print(f"  RW医師リスト: {len(rw_list)} 行 → ENT+RW: {len(doctor_master)} 行")
-print(f"  視聴ログ: {len(viewing_raw):,} 行 → その他除外: {len(viewing):,} 行")
+print(f"  売上データ: {len(sales_raw):,} 行 → ENT品目: {len(daily):,} 行")
+print(f"  RW医師リスト: {len(rw_list)} 行 → seg非空: {len(doctor_master)} 行")
+print(f"  視聴データ結合: {len(viewing):,} 行")
 
-daily["delivery_date"] = pd.to_datetime(daily["delivery_date"])
-viewing["view_date"] = pd.to_datetime(viewing["view_date"])
 months = pd.date_range(start=START_DATE, periods=N_MONTHS, freq="MS")
 
-# --- DGPの真のmodifierを表示 ---
-print("\n[DGPに組み込まれた処置効果の異質性 (modifier)]")
-print("  処置効果 = チャネル基本効果 x modifier")
-print("  modifier = 地域 x 施設タイプ x 経験年数 x 診療科")
-print()
-for dim_name, mods in TRUE_MODIFIERS.items():
-    print(f"  {dim_name}:")
-    for level, val in mods.items():
-        bar = "#" * int(val * 20)
-        print(f"    {level:<10}: {val:.2f}  {bar}")
-print()
-
 # --- 除外フロー ---
-print("[除外フロー]")
+print("\n[除外フロー]")
 docs_per_fac = doctor_master.groupby("facility_id")["doctor_id"].nunique()
 single_doc_facs = set(docs_per_fac[docs_per_fac == 1].index)
 
@@ -279,20 +312,72 @@ panel["treated"] = panel["cohort_month"].notna().astype(int)
 # 属性のマージ
 # ================================================================
 print("\n[属性のマージ]")
-doc_attrs = doctor_attr_master[["doctor_id", "experience_years", "experience_cat", "specialty"]]
-fac_attrs = facility_master[["facility_id", "region", "facility_type"]]
-
-panel = panel.merge(doc_attrs, left_on="doctor_id", right_on="doctor_id", how="left")
-panel = panel.merge(fac_attrs, on="facility_id", how="left")
 
 # ベースライン納入額 (wash-out期間の平均)
 baseline = panel[panel["month_index"] < WASHOUT_MONTHS].groupby("unit_id")["amount"].mean().reset_index()
 baseline.columns = ["unit_id", "baseline_amount"]
 baseline["baseline_cat"] = pd.qcut(baseline["baseline_amount"], q=3, labels=["低", "中", "高"])
 panel = panel.merge(baseline[["unit_id", "baseline_cat"]], on="unit_id", how="left")
+print(f"  baseline_cat: wash-out期間平均から3分位 → 低/中/高")
+
+# オプション属性ファイルの読み込み
+for attr_spec in OPTIONAL_ATTR_FILES:
+    attr_path = os.path.join(DATA_DIR, attr_spec["file"])
+    if not os.path.exists(attr_path):
+        print(f"  属性ファイル {attr_spec['file']} が見つかりません → スキップ")
+        continue
+
+    print(f"  属性ファイル {attr_spec['file']} を読み込み中...")
+    attr_df = pd.read_csv(attr_path)
+
+    # キーカラムをリネーム
+    key_col = attr_spec["key"]
+    merge_key = attr_spec["merge_key"]
+    if key_col in attr_df.columns and key_col != merge_key:
+        attr_df = attr_df.rename(columns={key_col: merge_key})
+
+    # 使用可能な次元カラムを検出
+    dim_cols = []
+    for dim_name, _ in attr_spec["dims"]:
+        if dim_name in attr_df.columns:
+            dim_cols.append(dim_name)
+
+    if not dim_cols:
+        print(f"    → 使用可能な属性カラムなし")
+        continue
+
+    # マージ
+    merge_cols = [merge_key] + dim_cols
+    attr_unique = attr_df[merge_cols].drop_duplicates(subset=merge_key)
+    panel = panel.merge(attr_unique, on=merge_key, how="left")
+
+    # CATE_DIMSに追加
+    for dim_name, levels in attr_spec["dims"]:
+        if dim_name not in panel.columns:
+            continue
+        if levels is None:
+            levels = sorted(panel[dim_name].dropna().unique().tolist())
+        CATE_DIMS.append((dim_name, levels))
+        print(f"    属性 {dim_name} を追加: {levels}")
+
+# DGPのmodifierが参照可能な次元があるか確認
+has_true_mods = any(dim_name in TRUE_MODIFIERS for dim_name, _ in CATE_DIMS)
+
+if has_true_mods:
+    print("\n[DGPに組み込まれた処置効果の異質性 (modifier)]")
+    print("  処置効果 = チャネル基本効果 x modifier")
+    for dim_name, mods in TRUE_MODIFIERS.items():
+        if any(dim_name == d for d, _ in CATE_DIMS):
+            print(f"  {dim_name}:")
+            for level, val in mods.items():
+                bar = "#" * int(val * 20)
+                print(f"    {level:<10}: {val:.2f}  {bar}")
 
 # 属性分布
-for attr in ["region", "facility_type", "experience_cat", "specialty", "baseline_cat"]:
+print("\n[属性分布]")
+for attr, levels in CATE_DIMS:
+    if attr not in panel.columns:
+        continue
     dist = panel.drop_duplicates("unit_id").groupby(["treated", attr]).size().unstack(fill_value=0)
     print(f"\n  {attr}:")
     print(f"    {'':>8} " + " ".join(f"{c:>8}" for c in dist.columns))
@@ -307,14 +392,6 @@ for attr in ["region", "facility_type", "experience_cat", "specialty", "baseline
 print("\n" + "=" * 70)
 print(" CATE推定: サブグループ別CS")
 print("=" * 70)
-
-CATE_DIMS = [
-    ("region", ["都市部", "郊外", "地方"]),
-    ("facility_type", ["病院", "クリニック"]),
-    ("experience_cat", ["若手", "中堅", "ベテラン"]),
-    ("specialty", ["内科", "外科", "その他"]),
-    ("baseline_cat", ["低", "中", "高"]),
-]
 
 N_BOOT = 150
 cate_results = {}
@@ -400,8 +477,9 @@ print("\n" + "=" * 70)
 print(" 推定結果サマリー")
 print("=" * 70)
 
-print(f"\n  {'次元':<16} {'レベル':<10} {'N':>4} {'ATT':>8} {'SE':>8} {'95%CI':>20} {'DGP':>6}")
-print(f"  {'-' * 78}")
+print(f"\n  {'次元':<16} {'レベル':<10} {'N':>4} {'ATT':>8} {'SE':>8} {'95%CI':>20}" +
+      (f" {'DGP':>6}" if has_true_mods else ""))
+print(f"  {'-' * (78 if has_true_mods else 70)}")
 
 for dim_name, levels in CATE_DIMS:
     for level in levels:
@@ -413,10 +491,13 @@ for dim_name, levels in CATE_DIMS:
             se_s = f"{r['se']:>8.1f}"
             ci_s = f"[{r['ci_lo']:>7.1f}, {r['ci_hi']:>7.1f}]"
 
-        true_mod = TRUE_MODIFIERS.get(dim_name, {}).get(level, None)
-        mod_s = f"{true_mod:>6.2f}" if true_mod is not None else "   N/A"
+        line = f"  {dim_name:<16} {level:<10} {r['n']:>4} {att_s} {se_s} {ci_s}"
+        if has_true_mods:
+            true_mod = TRUE_MODIFIERS.get(dim_name, {}).get(level, None)
+            mod_s = f"{true_mod:>6.2f}" if true_mod is not None else "   N/A"
+            line += f" {mod_s}"
 
-        print(f"  {dim_name:<16} {level:<10} {r['n']:>4} {att_s} {se_s} {ci_s} {mod_s}")
+        print(line)
     print()
 
 
@@ -437,7 +518,6 @@ for dim_name, levels in CATE_DIMS:
     min_l = min(valid, key=lambda l: valid[l]["att"])
     diff_val = valid[max_l]["att"] - valid[min_l]["att"]
 
-    # 対応するdiff_resultを探す
     p_str = ""
     if dim_name in diff_results:
         for key, d in diff_results[dim_name].items():
@@ -445,7 +525,6 @@ for dim_name, levels in CATE_DIMS:
                 p_str = f" (p={d['p']:.3f} {d['sig']})"
                 break
 
-    # DGP modifierとの整合性チェック
     dgp_check = ""
     if dim_name in TRUE_MODIFIERS:
         true_max = max(TRUE_MODIFIERS[dim_name], key=TRUE_MODIFIERS[dim_name].get)
@@ -468,16 +547,14 @@ print("\n" + "=" * 70)
 print(" 可視化")
 print("=" * 70)
 
-colors_map = {
-    "region": {"都市部": "#4C72B0", "郊外": "#55A868", "地方": "#C44E52"},
-    "facility_type": {"病院": "#4C72B0", "クリニック": "#C44E52"},
-    "experience_cat": {"若手": "#C44E52", "中堅": "#55A868", "ベテラン": "#4C72B0"},
-    "specialty": {"内科": "#C44E52", "外科": "#4C72B0", "その他": "#55A868"},
-    "baseline_cat": {"低": "#4C72B0", "中": "#55A868", "高": "#C44E52"},
-}
+colors_cycle = ["#4C72B0", "#C44E52", "#55A868", "#8172B2", "#CCB974", "#64B5CD"]
 
 n_dims = len(CATE_DIMS)
-fig, axes = plt.subplots(2, 3, figsize=(18, 11))
+n_plots = n_dims + (1 if has_true_mods else 0)
+n_cols = min(3, max(1, n_plots))
+n_rows = max(1, (n_plots + n_cols - 1) // n_cols)
+
+fig, axes = plt.subplots(n_rows, n_cols, figsize=(6 * n_cols, 5 * n_rows), squeeze=False)
 fig.suptitle("CATE分析: 属性別の異質的処置効果\n(Callaway-Sant'Anna, サブグループ別推定)",
              fontsize=13, fontweight="bold")
 axes_flat = axes.flatten()
@@ -495,7 +572,7 @@ for idx, (dim_name, levels) in enumerate(CATE_DIMS):
         atts.append(r["att"])
         ci_los.append(r["ci_lo"])
         ci_his.append(r["ci_hi"])
-        bar_colors.append(colors_map.get(dim_name, {}).get(level, "#4C72B0"))
+        bar_colors.append(colors_cycle[i % len(colors_cycle)])
 
     if not atts:
         ax.set_title(dim_name)
@@ -513,35 +590,40 @@ for idx, (dim_name, levels) in enumerate(CATE_DIMS):
     ax.set_title(dim_name)
     ax.grid(True, alpha=0.3, axis="x")
 
-# ATT vs DGP modifier
-ax = axes_flat[n_dims]
-est_atts, true_mods, labels = [], [], []
-for dim_name, levels in CATE_DIMS:
-    if dim_name not in TRUE_MODIFIERS:
-        continue
-    for level in levels:
-        r = cate_results[dim_name][level]
-        if np.isnan(r["att"]) or level not in TRUE_MODIFIERS[dim_name]:
+# ATT vs DGP modifier (only if applicable)
+if has_true_mods:
+    ax = axes_flat[n_dims]
+    est_atts, true_mods, labels = [], [], []
+    for dim_name, levels in CATE_DIMS:
+        if dim_name not in TRUE_MODIFIERS:
             continue
-        est_atts.append(r["att"])
-        true_mods.append(TRUE_MODIFIERS[dim_name][level])
-        labels.append(f"{dim_name}:{level}")
+        for level in levels:
+            r = cate_results[dim_name][level]
+            if np.isnan(r["att"]) or level not in TRUE_MODIFIERS[dim_name]:
+                continue
+            est_atts.append(r["att"])
+            true_mods.append(TRUE_MODIFIERS[dim_name][level])
+            labels.append(f"{dim_name}:{level}")
 
-if len(est_atts) > 1:
-    ax.scatter(true_mods, est_atts, s=60, c="#4C72B0", zorder=5)
-    for i, lbl in enumerate(labels):
-        ax.annotate(lbl, (true_mods[i], est_atts[i]),
-                     textcoords="offset points", xytext=(5, 5), fontsize=7)
-    z = np.polyfit(true_mods, est_atts, 1)
-    x_line = np.linspace(min(true_mods) - 0.05, max(true_mods) + 0.05, 50)
-    ax.plot(x_line, np.polyval(z, x_line), "r--", lw=1, alpha=0.7, label=f"slope={z[0]:.1f}")
-    corr = np.corrcoef(true_mods, est_atts)[0, 1]
-    ax.set_title(f"推定ATT vs DGP modifier (r={corr:.2f})")
-    ax.legend(fontsize=9)
+    if len(est_atts) > 1:
+        ax.scatter(true_mods, est_atts, s=60, c="#4C72B0", zorder=5)
+        for i, lbl in enumerate(labels):
+            ax.annotate(lbl, (true_mods[i], est_atts[i]),
+                         textcoords="offset points", xytext=(5, 5), fontsize=7)
+        z = np.polyfit(true_mods, est_atts, 1)
+        x_line = np.linspace(min(true_mods) - 0.05, max(true_mods) + 0.05, 50)
+        ax.plot(x_line, np.polyval(z, x_line), "r--", lw=1, alpha=0.7, label=f"slope={z[0]:.1f}")
+        corr = np.corrcoef(true_mods, est_atts)[0, 1]
+        ax.set_title(f"推定ATT vs DGP modifier (r={corr:.2f})")
+        ax.legend(fontsize=9)
 
-ax.set_xlabel("DGP modifier")
-ax.set_ylabel("推定ATT")
-ax.grid(True, alpha=0.3)
+    ax.set_xlabel("DGP modifier")
+    ax.set_ylabel("推定ATT")
+    ax.grid(True, alpha=0.3)
+
+# 未使用のaxesを非表示
+for idx in range(n_plots, len(axes_flat)):
+    axes_flat[idx].set_visible(False)
 
 plt.tight_layout()
 out_path = os.path.join(SCRIPT_DIR, "cate_results.png")
@@ -549,42 +631,47 @@ plt.savefig(out_path, dpi=150, bbox_inches="tight")
 plt.close(fig)
 print(f"\n  図を保存: {out_path}")
 
-# 可視化 2: 動的効果
-fig2, axes2 = plt.subplots(2, 2, figsize=(16, 11))
-fig2.suptitle("CATE動的効果: サブグループ別イベントスタディ", fontsize=13, fontweight="bold")
+# 可視化 2: 動的効果 (動的効果データのある次元のみ)
+plot_dims = [(d, l) for d, l in CATE_DIMS if any(
+    cate_results[d][lv]["dynamic"] is not None for lv in l
+)]
 
-plot_dims = [
-    ("region", ["都市部", "郊外", "地方"]),
-    ("facility_type", ["病院", "クリニック"]),
-    ("experience_cat", ["若手", "中堅", "ベテラン"]),
-    ("specialty", ["内科", "外科", "その他"]),
-]
-markers = ["o", "s", "^", "D"]
+if plot_dims:
+    n_dyn = len(plot_dims)
+    n_dyn_cols = min(2, n_dyn)
+    n_dyn_rows = max(1, (n_dyn + n_dyn_cols - 1) // n_dyn_cols)
+    fig2, axes2 = plt.subplots(n_dyn_rows, n_dyn_cols, figsize=(8 * n_dyn_cols, 5 * n_dyn_rows), squeeze=False)
+    fig2.suptitle("CATE動的効果: サブグループ別イベントスタディ", fontsize=13, fontweight="bold")
+    markers = ["o", "s", "^", "D", "v", "p"]
 
-for idx, (dim_name, levels) in enumerate(plot_dims):
-    ax = axes2[idx // 2, idx % 2]
-    ax.axhline(0, color="black", lw=0.8)
-    ax.axvline(-0.5, color="red", ls="--", lw=0.8, alpha=0.5)
-    for j, level in enumerate(levels):
-        r = cate_results[dim_name][level]
-        if r["dynamic"] is None:
-            continue
-        dyn = r["dynamic"]
-        col = colors_map.get(dim_name, {}).get(level, f"C{j}")
-        ax.fill_between(dyn["event_time"], dyn["ci_lo"], dyn["ci_hi"], alpha=0.08, color=col)
-        ax.plot(dyn["event_time"], dyn["att"], f"{markers[j]}-",
-                color=col, ms=3, label=f"{level} (N={r['n']})", lw=1)
-    ax.set_xlabel("イベント時間 (月)")
-    ax.set_ylabel("ATT")
-    ax.set_title(dim_name)
-    ax.legend(fontsize=8)
-    ax.grid(True, alpha=0.3)
+    for idx, (dim_name, levels) in enumerate(plot_dims):
+        ax = axes2[idx // n_dyn_cols, idx % n_dyn_cols]
+        ax.axhline(0, color="black", lw=0.8)
+        ax.axvline(-0.5, color="red", ls="--", lw=0.8, alpha=0.5)
+        for j, level in enumerate(levels):
+            r = cate_results[dim_name][level]
+            if r["dynamic"] is None:
+                continue
+            dyn = r["dynamic"]
+            col = colors_cycle[j % len(colors_cycle)]
+            ax.fill_between(dyn["event_time"], dyn["ci_lo"], dyn["ci_hi"], alpha=0.08, color=col)
+            ax.plot(dyn["event_time"], dyn["att"], f"{markers[j % len(markers)]}-",
+                    color=col, ms=3, label=f"{level} (N={r['n']})", lw=1)
+        ax.set_xlabel("イベント時間 (月)")
+        ax.set_ylabel("ATT")
+        ax.set_title(dim_name)
+        ax.legend(fontsize=8)
+        ax.grid(True, alpha=0.3)
 
-plt.tight_layout()
-out_path2 = os.path.join(SCRIPT_DIR, "cate_dynamic_effects.png")
-plt.savefig(out_path2, dpi=150, bbox_inches="tight")
-plt.close(fig2)
-print(f"  図を保存: {out_path2}")
+    # 未使用のaxesを非表示
+    for idx in range(n_dyn, n_dyn_rows * n_dyn_cols):
+        axes2[idx // n_dyn_cols, idx % n_dyn_cols].set_visible(False)
+
+    plt.tight_layout()
+    out_path2 = os.path.join(SCRIPT_DIR, "cate_dynamic_effects.png")
+    plt.savefig(out_path2, dpi=150, bbox_inches="tight")
+    plt.close(fig2)
+    print(f"  図を保存: {out_path2}")
 
 
 # ================================================================
@@ -601,10 +688,12 @@ print("""
   - Bootstrap (N=150) による標準誤差推定
   - サブグループ間差はBootstrap分布の差で検定""")
 
-print("  === DGPの真の処置効果異質性 ===")
-for dim_name, mods in TRUE_MODIFIERS.items():
-    vals = ", ".join(f"{k}={v}" for k, v in mods.items())
-    print(f"    {dim_name}: {vals}")
+if has_true_mods:
+    print("  === DGPの真の処置効果異質性 ===")
+    for dim_name, mods in TRUE_MODIFIERS.items():
+        if any(dim_name == d for d, _ in CATE_DIMS):
+            vals = ", ".join(f"{k}={v}" for k, v in mods.items())
+            print(f"    {dim_name}: {vals}")
 
 print("\n  === 推定されたCATEの要約 ===")
 for dim_name, levels in CATE_DIMS:
@@ -616,11 +705,14 @@ for dim_name, levels in CATE_DIMS:
     min_l = min(valid, key=lambda l: valid[l]["att"])
     print(f"    {dim_name}: {max_l}({valid[max_l]['att']:.1f}) > {min_l}({valid[min_l]['att']:.1f})")
 
-print("""
+print(f"""
+  === 分析次元 ===
+  使用次元: {', '.join(d for d, _ in CATE_DIMS)}
+  (オプション属性ファイルが data/ に存在すれば自動拡張)
+
   === 注意点 ===
   - サブグループのNが小さいため検出力は限定的
   - 各サブグループのATTは共通の対照群を使用
-  - modifier は乗算で効くため、基本効果が大きいほど差が拡大
   - baseline_catは処置前アウトカムからの導出 (内生性なし)
 """)
 
@@ -666,18 +758,27 @@ for dim_name, diffs in diff_results.items():
 
 # 属性分布テーブル
 attr_dist_json = {}
-for attr in ["region", "facility_type", "experience_cat", "specialty", "baseline_cat"]:
+for attr, _ in CATE_DIMS:
+    if attr not in panel.columns:
+        continue
     dist = panel.drop_duplicates("unit_id").groupby(["treated", attr]).size().unstack(fill_value=0)
     attr_dist_json[attr] = {
         "treated": {str(c): int(dist.loc[1, c]) for c in dist.columns} if 1 in dist.index else {},
         "control": {str(c): int(dist.loc[0, c]) for c in dist.columns} if 0 in dist.index else {},
     }
 
+# TRUE_MODIFIERS (使用された次元のみ)
+true_mods_json = {}
+if has_true_mods:
+    for dim_name in TRUE_MODIFIERS:
+        if any(dim_name == d for d, _ in CATE_DIMS):
+            true_mods_json[dim_name] = TRUE_MODIFIERS[dim_name]
+
 cate_results_json = {
     "cate": cate_json,
     "diff_tests": diff_json,
     "attr_distribution": attr_dist_json,
-    "true_modifiers": TRUE_MODIFIERS,
+    "true_modifiers": true_mods_json,
     "dimensions": [{"name": d, "levels": l} for d, l in CATE_DIMS],
 }
 
