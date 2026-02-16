@@ -155,7 +155,17 @@ with open(os.path.join(RESULTS_DIR, "did_results.json"), "r", encoding="utf-8") 
     did_results = json.load(f)
 with open(os.path.join(RESULTS_DIR, "cate_results.json"), "r", encoding="utf-8") as f:
     cate_results = json.load(f)
-print("  did_results.json, cate_results.json 読み込み完了")
+
+# 医師視聴パターン分析結果
+physician_viewing_path = os.path.join(RESULTS_DIR, "physician_viewing_analysis.json")
+if os.path.exists(physician_viewing_path):
+    with open(physician_viewing_path, "r", encoding="utf-8") as f:
+        physician_viewing_results = json.load(f)
+    print("  did_results.json, cate_results.json, physician_viewing_analysis.json 読み込み完了")
+else:
+    physician_viewing_results = None
+    print("  did_results.json, cate_results.json 読み込み完了")
+    print("  physician_viewing_analysis.json が見つかりません (05を実行してください)")
 
 
 # ================================================================
@@ -515,7 +525,7 @@ print("  コホート分布グラフ生成完了")
 print("\n[既存PNG読み込み]")
 
 existing_pngs = {}
-for name in ["staggered_did_results.png", "cate_results.png", "cate_dynamic_effects.png"]:
+for name in ["staggered_did_results.png", "cate_results.png", "cate_dynamic_effects.png", "physician_viewing_analysis.png"]:
     path = os.path.join(SCRIPT_DIR, name)
     if os.path.exists(path):
         existing_pngs[name] = png_to_base64(path)
@@ -714,7 +724,8 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
     <a href="#sec4">4. 視聴パターン</a>
     <a href="#sec5">5. DID推定結果</a>
     <a href="#sec6">6. CATE分析</a>
-    <a href="#sec7">7. 結論</a>
+    <a href="#sec7">7. 医師視聴パターン分析</a>
+    <a href="#sec8">8. 結論</a>
   </div>
 </nav>
 
@@ -1211,10 +1222,148 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 </section>
 
 <!-- ============================================================ -->
-<!-- Section 7: 結論 -->
+<!-- Section 7: 医師視聴パターン分析 -->
 <!-- ============================================================ -->
 <section id="sec7">
-<h2>7. 結論・主な知見</h2>
+<h2>7. 医師視聴パターン分析 (Intensive vs Extensive Margin)</h2>
+
+{% if pv_results %}
+<h3>7.1 分析目的</h3>
+<p>同じ医師への複数回視聴（<strong>深さ / Intensive Margin</strong>）と視聴医師層の拡大（<strong>広さ / Extensive Margin</strong>）のどちらが売上向上に効果的かを検証する。</p>
+
+<div class="highlight-box">
+  <strong>用語解説:</strong><br>
+  - <strong>Intensive Margin</strong>: 既に視聴したことがある医師への追加視聴（同一医師への複数回アプローチ）<br>
+  - <strong>Extensive Margin</strong>: 新規医師の獲得（未視聴医師への初回アプローチ）<br>
+  - <strong>定常視聴群</strong>: 3回以上視聴した医師<br>
+  - <strong>単発視聴群</strong>: 1-2回のみ視聴した医師<br>
+  - <strong>未視聴群</strong>: 一度も視聴していない医師
+</div>
+
+<h3>7.2 医師視聴パターン分類</h3>
+<table>
+  <tr>
+    <th>視聴パターン</th>
+    <th>医師数</th>
+    <th>割合</th>
+  </tr>
+  {% for pattern, count in pv_results.viewing_pattern_distribution.items() %}
+  <tr>
+    <td>{{ pattern }}</td>
+    <td>{{ count }}</td>
+    <td>{{ "%.1f"|format(count / pv_total_docs * 100) }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>7.3 視聴回数の基本統計（視聴医師のみ）</h3>
+<table>
+  <tr>
+    <th>統計量</th>
+    <th>値</th>
+  </tr>
+  <tr>
+    <td>平均</td>
+    <td>{{ "%.1f"|format(pv_results.viewing_statistics.mean) }} 回</td>
+  </tr>
+  <tr>
+    <td>中央値</td>
+    <td>{{ "%.0f"|format(pv_results.viewing_statistics.median) }} 回</td>
+  </tr>
+  <tr>
+    <td>最大</td>
+    <td>{{ pv_results.viewing_statistics.max }} 回</td>
+  </tr>
+  <tr>
+    <td>最小</td>
+    <td>{{ pv_results.viewing_statistics.min }} 回</td>
+  </tr>
+</table>
+
+<h3>7.4 Intensive vs Extensive Margin 推定結果</h3>
+<p>処置後期間におけるTWFE回帰（施設固定効果+時間固定効果）により、両指標の効果を同時推定。</p>
+
+<table>
+  <tr>
+    <th>指標</th>
+    <th>係数</th>
+    <th>SE</th>
+    <th>p値</th>
+    <th>有意性</th>
+  </tr>
+  <tr>
+    <td>Intensive Margin<br><small>(既存医師への追加視聴)</small></td>
+    <td>{{ "%.3f"|format(pv_results.margin_analysis.intensive_margin.coefficient) }}</td>
+    <td>{{ "%.3f"|format(pv_results.margin_analysis.intensive_margin.se) }}</td>
+    <td>{{ "%.6f"|format(pv_results.margin_analysis.intensive_margin.p) }}</td>
+    <td class="{{ 'sig' if pv_results.margin_analysis.intensive_margin.sig != 'n.s.' else 'ns' }}">
+      {{ pv_results.margin_analysis.intensive_margin.sig }}
+    </td>
+  </tr>
+  <tr>
+    <td>Extensive Margin<br><small>(新規医師獲得)</small></td>
+    <td>{{ "%.3f"|format(pv_results.margin_analysis.extensive_margin.coefficient) }}</td>
+    <td>{{ "%.3f"|format(pv_results.margin_analysis.extensive_margin.se) }}</td>
+    <td>{{ "%.6f"|format(pv_results.margin_analysis.extensive_margin.p) }}</td>
+    <td class="{{ 'sig' if pv_results.margin_analysis.extensive_margin.sig != 'n.s.' else 'ns' }}">
+      {{ pv_results.margin_analysis.extensive_margin.sig }}
+    </td>
+  </tr>
+</table>
+
+<div class="conclusion-box">
+<h3>戦略的推奨</h3>
+<p style="font-size:1.1em; font-weight:bold;">{{ pv_results.margin_analysis.recommendation }}</p>
+{% if pv_results.margin_analysis.recommendation == "深さ重視" %}
+<p>既存視聴医師への継続的な視聴促進（リマインド配信、フォローアップコンテンツ）を優先すべき。</p>
+{% elif pv_results.margin_analysis.recommendation == "広さ重視" %}
+<p>未視聴医師への初回視聴促進（新規ターゲティング、初回視聴キャンペーン）を優先すべき。</p>
+{% else %}
+<p>両方の戦略（既存医師への継続促進 + 新規医師の獲得）を並行して実施すべき。</p>
+{% endif %}
+</div>
+
+<h3>7.5 視聴パターン別の平均実績</h3>
+<table>
+  <tr>
+    <th>視聴パターン</th>
+    <th>全期間平均</th>
+    <th>wash-out後平均</th>
+  </tr>
+  {% for pattern in ["未視聴", "単発視聴", "定常視聴"] %}
+  <tr>
+    <td>{{ pattern }}</td>
+    <td>{{ "%.1f"|format(pv_results.pattern_means.all_period.get(pattern, 0)) }}</td>
+    <td>{{ "%.1f"|format(pv_results.pattern_means.post_washout.get(pattern, 0)) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>7.6 可視化</h3>
+{% if png_physician_viewing %}
+<div class="img-container">
+  <img src="data:image/png;base64,{{ png_physician_viewing }}" alt="Physician Viewing Analysis">
+</div>
+<p style="font-size:0.9em; color:#616161; margin-top:8px;">
+  (a) 視聴パターン別の実績推移 /
+  (b) Intensive/Extensive Margin時系列 /
+  (c) 医師視聴回数分布 /
+  (d) 視聴パターン別医師数
+</p>
+{% else %}
+<p>physician_viewing_analysis.png が見つかりません。</p>
+{% endif %}
+
+{% else %}
+<p>医師視聴パターン分析結果が見つかりません。<code>05_intensive_extensive_margin.py</code>を実行してください。</p>
+{% endif %}
+</section>
+
+<!-- ============================================================ -->
+<!-- Section 8: 結論 -->
+<!-- ============================================================ -->
+<section id="sec8">
+<h2>8. 結論・主な知見</h2>
 
 <div class="conclusion-box">
 <h3>全体効果</h3>
@@ -1348,6 +1497,11 @@ template_data = {
     "png_did": existing_pngs.get("staggered_did_results.png", ""),
     "png_cate": existing_pngs.get("cate_results.png", ""),
     "png_cate_dyn": existing_pngs.get("cate_dynamic_effects.png", ""),
+    "png_physician_viewing": existing_pngs.get("physician_viewing_analysis.png", ""),
+
+    # 医師視聴パターン分析
+    "pv_results": DotDict(physician_viewing_results) if physician_viewing_results else None,
+    "pv_total_docs": sum(physician_viewing_results.get("viewing_pattern_distribution", {}).values()) if physician_viewing_results else 0,
 }
 
 html_content = HTML_TEMPLATE.render(**template_data)
