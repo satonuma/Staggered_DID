@@ -158,14 +158,30 @@ with open(os.path.join(RESULTS_DIR, "cate_results.json"), "r", encoding="utf-8")
 
 # 医師視聴パターン分析結果
 physician_viewing_path = os.path.join(RESULTS_DIR, "physician_viewing_analysis.json")
+propensity_score_path = os.path.join(RESULTS_DIR, "propensity_score_analysis.json")
+mr_mediation_path = os.path.join(RESULTS_DIR, "mr_activity_mediation.json")
+
+physician_viewing_results = None
+propensity_score_results = None
+mr_mediation_results = None
+
+loaded_files = []
 if os.path.exists(physician_viewing_path):
     with open(physician_viewing_path, "r", encoding="utf-8") as f:
         physician_viewing_results = json.load(f)
-    print("  did_results.json, cate_results.json, physician_viewing_analysis.json 読み込み完了")
-else:
-    physician_viewing_results = None
-    print("  did_results.json, cate_results.json 読み込み完了")
-    print("  physician_viewing_analysis.json が見つかりません (05を実行してください)")
+    loaded_files.append("physician_viewing_analysis.json")
+
+if os.path.exists(propensity_score_path):
+    with open(propensity_score_path, "r", encoding="utf-8") as f:
+        propensity_score_results = json.load(f)
+    loaded_files.append("propensity_score_analysis.json")
+
+if os.path.exists(mr_mediation_path):
+    with open(mr_mediation_path, "r", encoding="utf-8") as f:
+        mr_mediation_results = json.load(f)
+    loaded_files.append("mr_activity_mediation.json")
+
+print(f"  did_results.json, cate_results.json, {', '.join(loaded_files) if loaded_files else '(医師視聴分析なし)'} 読み込み完了")
 
 
 # ================================================================
@@ -525,7 +541,15 @@ print("  コホート分布グラフ生成完了")
 print("\n[既存PNG読み込み]")
 
 existing_pngs = {}
-for name in ["staggered_did_results.png", "cate_results.png", "cate_dynamic_effects.png", "physician_viewing_analysis.png"]:
+png_files = [
+    "staggered_did_results.png",
+    "cate_results.png",
+    "cate_dynamic_effects.png",
+    "physician_viewing_analysis.png",
+    "propensity_score_analysis.png",
+    "mr_activity_mediation.png"
+]
+for name in png_files:
     path = os.path.join(SCRIPT_DIR, name)
     if os.path.exists(path):
         existing_pngs[name] = png_to_base64(path)
@@ -1225,22 +1249,45 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 <!-- Section 7: 医師視聴パターン分析 -->
 <!-- ============================================================ -->
 <section id="sec7">
-<h2>7. 医師視聴パターン分析 (Intensive vs Extensive Margin)</h2>
+<h2>7. 医師視聴パターン分析</h2>
+
+<div class="highlight-box" style="background:#FFF3E0; border-color:#FFB300;">
+  <strong>⚠️ 重要な注意：内生性の問題</strong><br>
+  視聴回数は医師の自発的行動であり、制御不可能な変数です。<br>
+  - 元々関心が高い医師ほど多く視聴（選択バイアス）<br>
+  - 処方意向が高い医師ほど視聴（逆因果）<br>
+  - 配信はできるが視聴は強制できない<br>
+  <br>
+  したがって、本分析の結果は <strong>「関連性」</strong> であり <strong>「因果効果」ではありません</strong>。<br>
+  推定値は真の効果の上限値として解釈すべきです。
+</div>
+
+<h3>概要</h3>
+<p>以下の3つの分析アプローチで、視聴パターンと売上の関連性を多角的に検証します：</p>
+<ul>
+  <li><strong>7.1</strong>: Intensive vs Extensive Margin（視聴回数ベース）</li>
+  <li><strong>7.2</strong>: セッションベース視聴パターン + 傾向スコア調整</li>
+  <li><strong>7.3</strong>: MR活動Mediation分析（制御可能な変数）</li>
+  <li><strong>7.4</strong>: 統合的解釈と実務的示唆</li>
+</ul>
+
+<hr style="margin:20px 0;">
+
+<!-- 7.1: Intensive vs Extensive Margin -->
+<h3 id="sec7-1">7.1 Intensive vs Extensive Margin 分析</h3>
 
 {% if pv_results %}
-<h3>7.1 分析目的</h3>
-<p>同じ医師への複数回視聴（<strong>深さ / Intensive Margin</strong>）と視聴医師層の拡大（<strong>広さ / Extensive Margin</strong>）のどちらが売上向上に効果的かを検証する。</p>
+<p>同じ医師への複数回視聴（<strong>深さ / Intensive Margin</strong>）と視聴医師層の拡大（<strong>広さ / Extensive Margin</strong>）のどちらが売上向上に関連するかを検証。</p>
 
 <div class="highlight-box">
   <strong>用語解説:</strong><br>
-  - <strong>Intensive Margin</strong>: 既に視聴したことがある医師への追加視聴（同一医師への複数回アプローチ）<br>
-  - <strong>Extensive Margin</strong>: 新規医師の獲得（未視聴医師への初回アプローチ）<br>
-  - <strong>定常視聴群</strong>: 3回以上視聴した医師<br>
-  - <strong>単発視聴群</strong>: 1-2回のみ視聴した医師<br>
-  - <strong>未視聴群</strong>: 一度も視聴していない医師
+  - <strong>Intensive Margin</strong>: 既に視聴したことがある医師への追加視聴<br>
+  - <strong>Extensive Margin</strong>: 新規医師の獲得<br>
+  - <strong>定常視聴群</strong>: 3回以上視聴<br>
+  - <strong>単発視聴群</strong>: 1-2回のみ視聴
 </div>
 
-<h3>7.2 医師視聴パターン分類</h3>
+<h4>7.1.1 視聴パターン分類（回数ベース）</h4>
 <table>
   <tr>
     <th>視聴パターン</th>
@@ -1256,32 +1303,8 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   {% endfor %}
 </table>
 
-<h3>7.3 視聴回数の基本統計（視聴医師のみ）</h3>
-<table>
-  <tr>
-    <th>統計量</th>
-    <th>値</th>
-  </tr>
-  <tr>
-    <td>平均</td>
-    <td>{{ "%.1f"|format(pv_results.viewing_statistics.mean) }} 回</td>
-  </tr>
-  <tr>
-    <td>中央値</td>
-    <td>{{ "%.0f"|format(pv_results.viewing_statistics.median) }} 回</td>
-  </tr>
-  <tr>
-    <td>最大</td>
-    <td>{{ pv_results.viewing_statistics.max }} 回</td>
-  </tr>
-  <tr>
-    <td>最小</td>
-    <td>{{ pv_results.viewing_statistics.min }} 回</td>
-  </tr>
-</table>
-
-<h3>7.4 Intensive vs Extensive Margin 推定結果</h3>
-<p>処置後期間におけるTWFE回帰（施設固定効果+時間固定効果）により、両指標の効果を同時推定。</p>
+<h4>7.1.2 Intensive vs Extensive Margin 推定結果</h4>
+<p>処置後期間におけるTWFE回帰により、両指標の関連性を同時推定。</p>
 
 <table>
   <tr>
@@ -1323,7 +1346,7 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 {% endif %}
 </div>
 
-<h3>7.5 視聴パターン別の平均実績</h3>
+<h4>7.1.3 視聴パターン別の平均実績</h4>
 <table>
   <tr>
     <th>視聴パターン</th>
@@ -1339,7 +1362,7 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
   {% endfor %}
 </table>
 
-<h3>7.6 可視化</h3>
+<h4>7.1.4 可視化</h4>
 {% if png_physician_viewing %}
 <div class="img-container">
   <img src="data:image/png;base64,{{ png_physician_viewing }}" alt="Physician Viewing Analysis">
@@ -1357,6 +1380,305 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 {% else %}
 <p>医師視聴パターン分析結果が見つかりません。<code>05_intensive_extensive_margin.py</code>を実行してください。</p>
 {% endif %}
+
+<!-- 7.2: セッションベース視聴パターン + 傾向スコア調整 -->
+<hr style="margin:30px 0;">
+<h3 id="sec7-2">7.2 セッションベース視聴パターン + 傾向スコア調整</h3>
+
+{% if pv_ps_results %}
+<p>視聴回数だけでなく <strong>視聴の時間的パターン</strong> を考慮し、医師・施設属性による <strong>選択バイアスを調整</strong>。</p>
+
+<h4>7.2.1 セッション分類の考え方</h4>
+<div class="highlight-box">
+  <strong>セッション定義:</strong><br>
+  視聴と視聴の間隔が {{ pv_ps_results.session_classification.gap_threshold_days }} 日以上空いた場合、別セッションとみなす。<br><br>
+
+  <strong>視聴パターン分類:</strong><br>
+  - <strong>短期集中型</strong>: 短期間に集中視聴（1セッション、期間≤30日）<br>
+  - <strong>長期継続型</strong>: 長期間継続視聴（1セッション、期間>30日）<br>
+  - <strong>定期視聴型</strong>: 複数セッション、間隔が短い（平均≤60日）<br>
+  - <strong>断続視聴型</strong>: 複数セッション、間隔が長い（平均>60日）<br>
+  - <strong>単発視聴</strong>: 1回のみ視聴<br>
+  - <strong>未視聴</strong>: 視聴なし
+</div>
+
+<h4>7.2.2 視聴パターン分布</h4>
+<table>
+  <tr>
+    <th>パターン</th>
+    <th>医師数</th>
+    <th>割合</th>
+  </tr>
+  {% for pattern, count in pv_ps_results.session_classification.pattern_distribution.items() %}
+  <tr>
+    <td>{{ pattern }}</td>
+    <td>{{ count }}</td>
+    <td>{{ "%.1f"|format(count / pv_ps_total_docs * 100) }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h4>7.2.3 傾向スコア推定</h4>
+<p>視聴有無を、医師・施設属性（経験年数、診療科、地域、施設タイプ）で予測するLogitモデルを推定。</p>
+
+<table>
+  <tr>
+    <th>指標</th>
+    <th>値</th>
+  </tr>
+  <tr>
+    <td>Pseudo R2</td>
+    <td>{{ "%.4f"|format(pv_ps_results.propensity_score_model.pseudo_r2) }}</td>
+  </tr>
+  <tr>
+    <td>視聴群の平均傾向スコア</td>
+    <td>{{ "%.4f"|format(pv_ps_results.propensity_score_model.treated_mean) }}</td>
+  </tr>
+  <tr>
+    <td>未視聴群の平均傾向スコア</td>
+    <td>{{ "%.4f"|format(pv_ps_results.propensity_score_model.control_mean) }}</td>
+  </tr>
+</table>
+
+<p style="margin-top:10px; font-size:0.95em;">
+  Pseudo R2が {{ "%.2f"|format(pv_ps_results.propensity_score_model.pseudo_r2 * 100) }}% で、視聴群の平均傾向スコアが未視聴群より高い。
+  これは視聴医師が特定の属性（経験豊富、都市部など）に偏っていることを示唆。
+</p>
+
+<h4>7.2.4 IPW調整後の平均売上</h4>
+<p>逆確率重み付け（IPW）により、属性バイアスを調整した各パターンの平均売上を推定。</p>
+
+<table>
+  <tr>
+    <th>パターン</th>
+    <th>IPW調整後平均売上</th>
+    <th>医師数</th>
+  </tr>
+  {% for item in pv_ps_results.ipw_adjusted_means %}
+  <tr>
+    <td>{{ item.pattern }}</td>
+    <td>{{ "%.1f"|format(item.mean_ipw) }}</td>
+    <td>{{ "%.0f"|format(item.n) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h4>7.2.5 可視化</h4>
+{% if png_propensity_score %}
+<div class="img-container">
+  <img src="data:image/png;base64,{{ png_propensity_score }}" alt="Propensity Score Analysis">
+</div>
+<p style="font-size:0.9em; color:#616161; margin-top:8px;">
+  (a) セッション分類分布 / (b) 傾向スコア分布 / (c) IPW調整後の平均売上
+</p>
+{% else %}
+<p>propensity_score_analysis.png が見つかりません。</p>
+{% endif %}
+
+<div class="highlight-box" style="background-color:#fff3cd; border-left:4px solid #ffc107;">
+  <strong>解釈の注意:</strong><br>
+  {{ pv_ps_results.interpretation.warning }}<br>
+  {{ pv_ps_results.interpretation.recommendation }}
+</div>
+
+{% else %}
+<p>傾向スコア分析結果が見つかりません。<code>06_propensity_score_analysis.py</code>を実行してください。</p>
+{% endif %}
+
+<!-- 7.3: MR活動Mediation分析 -->
+<hr style="margin:30px 0;">
+<h3 id="sec7-3">7.3 MR活動によるMediation分析</h3>
+
+{% if mr_results %}
+<p><strong>MR活動</strong>（訪問回数）は <strong>企業が制御可能な変数</strong>。MR活動が視聴を介して売上に影響する経路を検証。</p>
+
+<h4>7.3.1 分析の枠組み</h4>
+<div class="highlight-box">
+  <strong>Mediation仮説:</strong><br>
+  MR活動 → 視聴機会増加 → 売上向上<br><br>
+
+  <strong>2段階推定:</strong><br>
+  ① Stage 1: MR活動 → 視聴回数 (相関)<br>
+  ② Stage 2: 予測視聴 → 売上 (間接効果)<br>
+  ③ Direct: MR活動 → 売上 (直接効果、視聴を制御)
+</div>
+
+<h4>7.3.2 Stage 1: MR活動 → 視聴</h4>
+<table>
+  <tr>
+    <th>指標</th>
+    <th>値</th>
+  </tr>
+  <tr>
+    <td>MR活動-視聴相関係数</td>
+    <td>{{ "%.4f"|format(mr_results.mr_viewing_correlation) }}</td>
+  </tr>
+  <tr>
+    <td>MR活動の係数</td>
+    <td>{{ "%.4f"|format(mr_results.stage1_mr_to_viewing.coefficient) }}</td>
+  </tr>
+  <tr>
+    <td>p値</td>
+    <td>{{ "%.4f"|format(mr_results.stage1_mr_to_viewing.p) }}</td>
+  </tr>
+  <tr>
+    <td>有意性</td>
+    <td>{{ mr_results.stage1_mr_to_viewing.sig }}</td>
+  </tr>
+</table>
+
+<p style="margin-top:10px; font-size:0.95em;">
+  相関係数が {{ "%.3f"|format(mr_results.mr_viewing_correlation) }} と非常に小さく、
+  <strong>MR活動だけでは視聴をほとんど説明できない</strong>。
+  これは視聴が複数チャネル（ベンダーサイト、MRメール、web講演会など）から発生し、
+  MR活動以外の要因が大きいことを示唆。
+</p>
+
+<h4>7.3.3 Stage 2: 視聴 → 売上</h4>
+<table>
+  <tr>
+    <th>変数</th>
+    <th>係数</th>
+    <th>SE</th>
+    <th>p値</th>
+    <th>有意性</th>
+  </tr>
+  <tr>
+    <td>視聴回数</td>
+    <td>{{ "%.3f"|format(mr_results.stage2_viewing_to_sales.coefficient) }}</td>
+    <td>{{ "%.3f"|format(mr_results.stage2_viewing_to_sales.se) }}</td>
+    <td>{{ "%.6f"|format(mr_results.stage2_viewing_to_sales.p) }}</td>
+    <td class="{{ 'sig' if mr_results.stage2_viewing_to_sales.sig != 'n.s.' else 'ns' }}">
+      {{ mr_results.stage2_viewing_to_sales.sig }}
+    </td>
+  </tr>
+</table>
+
+<h4>7.3.4 Mediation効果の分解</h4>
+<table>
+  <tr>
+    <th>効果</th>
+    <th>値</th>
+  </tr>
+  <tr>
+    <td>Direct Effect (直接効果)</td>
+    <td>{{ "%.3f"|format(mr_results.mediation_effects.direct_effect) }}</td>
+  </tr>
+  <tr>
+    <td>Indirect Effect (間接効果)</td>
+    <td>{{ "%.3f"|format(mr_results.mediation_effects.indirect_effect) }}</td>
+  </tr>
+  <tr>
+    <td>Total Effect (総効果)</td>
+    <td>{{ "%.3f"|format(mr_results.mediation_effects.total_effect) }}</td>
+  </tr>
+  <tr>
+    <td>間接効果の割合</td>
+    <td>{{ "%.1f"|format(mr_results.mediation_effects.indirect_percentage) }}%</td>
+  </tr>
+</table>
+
+<p style="margin-top:10px; font-size:0.95em;">
+  間接効果（MR活動→視聴→売上）が総効果の約 {{ "%.0f"|format(mr_results.mediation_effects.indirect_percentage) }}% を占める。
+</p>
+
+<h4>7.3.5 可視化</h4>
+{% if png_mr_mediation %}
+<div class="img-container">
+  <img src="data:image/png;base64,{{ png_mr_mediation }}" alt="MR Activity Mediation Analysis">
+</div>
+<p style="font-size:0.9em; color:#616161; margin-top:8px;">
+  (a) MR活動-視聴の散布図 / (b) MR活動と視聴の時系列 / (c) 直接効果の係数
+</p>
+{% else %}
+<p>mr_activity_mediation.png が見つかりません。</p>
+{% endif %}
+
+<div class="conclusion-box">
+<h4>Mediation分析の結論</h4>
+<p style="font-size:0.95em; margin-top:8px;">
+  <strong>{{ mr_results.interpretation.warning }}</strong><br><br>
+  {{ mr_results.interpretation.advantage }}<br><br>
+  {{ mr_results.interpretation.recommendation }}
+</p>
+</div>
+
+{% else %}
+<p>MR活動Mediation分析結果が見つかりません。<code>07_mr_activity_mediation.py</code>を実行してください。</p>
+{% endif %}
+
+<!-- 7.4: 統合的解釈と実務的示唆 -->
+<hr style="margin:30px 0;">
+<h3 id="sec7-4">7.4 統合的解釈と実務的示唆</h3>
+
+<div class="conclusion-box" style="background-color:#e8f5e9; border-left:4px solid #4caf50;">
+<h4>3つの分析から得られた知見の統合</h4>
+
+<h5 style="margin-top:15px;">1️⃣ 視聴パターンと売上の関連性 (7.1)</h5>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li><strong>Intensive Margin（既存医師への追加視聴）</strong> の方が売上との関連性が強い</li>
+  <li>視聴回数が多い医師ほど高売上の傾向（ただし因果関係ではない）</li>
+</ul>
+
+<h5 style="margin-top:15px;">2️⃣ 時間的パターンと選択バイアス (7.2)</h5>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li>視聴パターンを <strong>セッションベース</strong> で分類すると、定期視聴型が最も高売上</li>
+  <li>傾向スコアによる調整後も、この傾向は維持される</li>
+  <li>ただし、視聴意欲の高い医師が元々高売上である可能性は排除できない</li>
+</ul>
+
+<h5 style="margin-top:15px;">3️⃣ 制御可能な変数としてのMR活動 (7.3)</h5>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li>MR活動と視聴の相関は <strong>ほぼゼロ</strong>（相関係数 {{ "%.3f"|format(mr_results.mr_viewing_correlation) if mr_results else "N/A" }}）</li>
+  <li>視聴は多様なチャネル（ベンダーサイト、メール、web講演会）から発生</li>
+  <li>MR活動単独では視聴行動を制御できない</li>
+</ul>
+</div>
+
+<div class="highlight-box" style="background-color:#fff3cd; border-left:4px solid #ffc107;">
+<h4>実務的な示唆と推奨アクション</h4>
+
+<h5 style="margin-top:15px;">✅ 推奨される戦略</h5>
+<ol style="margin:8px 0; padding-left:25px;">
+  <li><strong>既存視聴医師へのフォローアップ強化</strong>
+    <ul style="margin:5px 0; padding-left:20px;">
+      <li>定期的なリマインド配信（メール、MR経由）</li>
+      <li>新コンテンツのプッシュ通知</li>
+      <li>視聴履歴に基づくパーソナライズ配信</li>
+    </ul>
+  </li>
+
+  <li><strong>チャネル横断的な接触機会の創出</strong>
+    <ul style="margin:5px 0; padding-left:20px;">
+      <li>ベンダーサイトでの露出強化</li>
+      <li>web講演会との連携</li>
+      <li>MR訪問時のコンテンツ紹介</li>
+    </ul>
+  </li>
+
+  <li><strong>属性ベースのターゲティング精緻化</strong>
+    <ul style="margin:5px 0; padding-left:20px;">
+      <li>傾向スコアモデルを活用し、視聴確率の高い医師を優先</li>
+      <li>経験年数、地域、施設タイプなどの属性を考慮</li>
+    </ul>
+  </li>
+</ol>
+
+<h5 style="margin-top:15px;">⚠️ 注意すべき点</h5>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li><strong>視聴は結果であって原因ではない可能性</strong>: 元々興味のある医師が視聴し、その医師が処方する</li>
+  <li><strong>配信数を増やすだけでは視聴増加は保証されない</strong>: 多様なチャネルからのアクセスが重要</li>
+  <li><strong>MR活動だけでは視聴をコントロールできない</strong>: 統合的なマーケティング戦略が必要</li>
+</ul>
+
+<h5 style="margin-top:15px;">📊 今後の分析の方向性</h5>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li>チャネル別の視聴効率の測定（どのチャネルが最も視聴に繋がるか）</li>
+  <li>コンテンツタイプ別の効果検証（疾患情報 vs 製品情報など）</li>
+  <li>視聴タイミングと処方タイミングのラグ分析</li>
+  <li>RCT（ランダム化比較試験）による因果効果の厳密な検証</li>
+</ul>
+</div>
 </section>
 
 <!-- ============================================================ -->
@@ -1498,10 +1820,19 @@ template_data = {
     "png_cate": existing_pngs.get("cate_results.png", ""),
     "png_cate_dyn": existing_pngs.get("cate_dynamic_effects.png", ""),
     "png_physician_viewing": existing_pngs.get("physician_viewing_analysis.png", ""),
+    "png_propensity_score": existing_pngs.get("propensity_score_analysis.png", ""),
+    "png_mr_mediation": existing_pngs.get("mr_activity_mediation.png", ""),
 
     # 医師視聴パターン分析
     "pv_results": DotDict(physician_viewing_results) if physician_viewing_results else None,
     "pv_total_docs": sum(physician_viewing_results.get("viewing_pattern_distribution", {}).values()) if physician_viewing_results else 0,
+
+    # 傾向スコア分析
+    "pv_ps_results": DotDict(propensity_score_results) if propensity_score_results else None,
+    "pv_ps_total_docs": sum(propensity_score_results.get("session_classification", {}).get("pattern_distribution", {}).values()) if propensity_score_results else 0,
+
+    # MR活動Mediation分析
+    "mr_results": DotDict(mr_mediation_results) if mr_mediation_results else None,
 }
 
 html_content = HTML_TEMPLATE.render(**template_data)
