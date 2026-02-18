@@ -160,10 +160,12 @@ with open(os.path.join(RESULTS_DIR, "cate_results.json"), "r", encoding="utf-8")
 physician_viewing_path = os.path.join(RESULTS_DIR, "physician_viewing_analysis.json")
 propensity_score_path = os.path.join(RESULTS_DIR, "propensity_score_analysis.json")
 mr_mediation_path = os.path.join(RESULTS_DIR, "mr_activity_mediation.json")
+mr_digital_balance_path = os.path.join(RESULTS_DIR, "mr_digital_balance.json")
 
 physician_viewing_results = None
 propensity_score_results = None
 mr_mediation_results = None
+mr_digital_balance_results = None
 
 loaded_files = []
 if os.path.exists(physician_viewing_path):
@@ -180,6 +182,11 @@ if os.path.exists(mr_mediation_path):
     with open(mr_mediation_path, "r", encoding="utf-8") as f:
         mr_mediation_results = json.load(f)
     loaded_files.append("mr_activity_mediation.json")
+
+if os.path.exists(mr_digital_balance_path):
+    with open(mr_digital_balance_path, "r", encoding="utf-8") as f:
+        mr_digital_balance_results = json.load(f)
+    loaded_files.append("mr_digital_balance.json")
 
 print(f"  did_results.json, cate_results.json, {', '.join(loaded_files) if loaded_files else '(医師視聴分析なし)'} 読み込み完了")
 
@@ -547,7 +554,8 @@ png_files = [
     "cate_dynamic_effects.png",
     "physician_viewing_analysis.png",
     "propensity_score_analysis.png",
-    "mr_activity_mediation.png"
+    "mr_activity_mediation.png",
+    "mr_digital_balance.png"
 ]
 for name in png_files:
     path = os.path.join(SCRIPT_DIR, name)
@@ -1682,10 +1690,198 @@ HTML_TEMPLATE = Template("""<!DOCTYPE html>
 </section>
 
 <!-- ============================================================ -->
-<!-- Section 8: 結論 -->
+<!-- Section 8: MR vs デジタルバランス分析 -->
 <!-- ============================================================ -->
 <section id="sec8">
-<h2>8. 結論・主な知見</h2>
+<h2>8. MR vs デジタルバランス分析：最適リソース配分</h2>
+
+{% if mr_balance_results %}
+<div class="highlight-box" style="background-color:#e3f2fd; border-left:4px solid #2196f3;">
+  <strong>分析目的:</strong> MR活動とデジタルチャネルの最適なバランスを定量的に評価し、
+  具体的なリソース配分シナリオを提示する。
+</div>
+
+<h3>8.1 限界効果の推定</h3>
+<p>TWFE回帰により、MR活動とデジタル視聴それぞれの売上への限界効果を推定。</p>
+
+<table>
+  <tr>
+    <th>変数</th>
+    <th>限界効果（万円/回）</th>
+    <th>SE</th>
+    <th>p値</th>
+    <th>有意性</th>
+  </tr>
+  <tr>
+    <td>MR活動</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.mr.coefficient) }}</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.mr.se) }}</td>
+    <td>{{ "%.6f"|format(mr_balance_results.marginal_effects.mr.p) }}</td>
+    <td class="{{ 'sig' if mr_balance_results.marginal_effects.mr.sig != 'n.s.' else 'ns' }}">
+      {{ mr_balance_results.marginal_effects.mr.sig }}
+    </td>
+  </tr>
+  <tr>
+    <td>デジタル視聴</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.digital.coefficient) }}</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.digital.se) }}</td>
+    <td>{{ "%.6f"|format(mr_balance_results.marginal_effects.digital.p) }}</td>
+    <td class="{{ 'sig' if mr_balance_results.marginal_effects.digital.sig != 'n.s.' else 'ns' }}">
+      {{ mr_balance_results.marginal_effects.digital.sig }}
+    </td>
+  </tr>
+</table>
+
+<div class="conclusion-box" style="background-color:#fff3cd; border-left:4px solid #ffc107;">
+  <strong>重要な知見:</strong><br>
+  デジタル視聴の限界効果（{{ "%.2f"|format(mr_balance_results.marginal_effects.digital.coefficient) }}万円）は、
+  MR活動（{{ "%.2f"|format(mr_balance_results.marginal_effects.mr.coefficient) }}万円）の
+  <strong>約{{ "%.1f"|format(mr_balance_results.marginal_effects.digital.coefficient / mr_balance_results.marginal_effects.mr.coefficient) }}倍</strong>。
+</div>
+
+<h3>8.2 コスト効率性の比較</h3>
+<p>コスト仮定を用いて、各チャネルの費用対効果を計算。</p>
+
+<div class="highlight-box">
+  <strong>コスト仮定（万円）:</strong><br>
+  - MR 1名あたり年間コスト: {{ "{:,.0f}".format(mr_balance_results.cost_assumptions.mr_fte_annual) }}万円<br>
+  - MR活動1回あたりコスト: {{ "%.1f"|format(mr_balance_results.cost_assumptions.mr_per_visit) }}万円<br>
+  - デジタル配信1回あたりコスト: {{ "%.1f"|format(mr_balance_results.cost_assumptions.digital_per_view) }}万円
+</div>
+
+<table>
+  <tr>
+    <th>指標</th>
+    <th>MR活動</th>
+    <th>デジタル視聴</th>
+  </tr>
+  <tr>
+    <td>1回あたりコスト（万円）</td>
+    <td>{{ "%.1f"|format(mr_balance_results.cost_assumptions.mr_per_visit) }}</td>
+    <td>{{ "%.1f"|format(mr_balance_results.cost_assumptions.digital_per_view) }}</td>
+  </tr>
+  <tr>
+    <td>1回あたり売上貢献（万円）</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.mr.coefficient) }}</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.digital.coefficient) }}</td>
+  </tr>
+  <tr>
+    <td>費用対効果（売上/コスト）</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.mr.coefficient / mr_balance_results.cost_assumptions.mr_per_visit) }}</td>
+    <td>{{ "%.2f"|format(mr_balance_results.marginal_effects.digital.coefficient / mr_balance_results.cost_assumptions.digital_per_view) }}</td>
+  </tr>
+</table>
+
+<div class="conclusion-box" style="background-color:#e8f5e9; border-left:4px solid #4caf50;">
+  <strong>コスト効率性:</strong><br>
+  デジタルの費用対効果は、MRの
+  <strong>約{{ "%.0f"|format((mr_balance_results.marginal_effects.digital.coefficient / mr_balance_results.cost_assumptions.digital_per_view) / (mr_balance_results.marginal_effects.mr.coefficient / mr_balance_results.cost_assumptions.mr_per_visit)) }}倍</strong>。
+</div>
+
+<h3>8.3 リソース配分シナリオ</h3>
+<p>複数のシナリオで、コストと売上のトレードオフを検証。</p>
+
+<table>
+  <tr>
+    <th>シナリオ</th>
+    <th>MR FTE</th>
+    <th>デジタル予算<br>（万円）</th>
+    <th>総コスト<br>（万円）</th>
+    <th>コスト変化</th>
+    <th>売上変化</th>
+    <th>ROI</th>
+  </tr>
+  {% for scenario in mr_balance_results.scenarios %}
+  <tr style="{{ 'background-color:#fff9c4;' if loop.index == 1 else '' }}">
+    <td><strong>{{ scenario.scenario_name }}</strong></td>
+    <td>{{ "%.0f"|format(scenario.mr_fte) }}名</td>
+    <td>{{ "{:,.0f}".format(scenario.digital_budget) }}</td>
+    <td>{{ "{:,.0f}".format(scenario.total_cost) }}</td>
+    <td class="{{ 'sig' if scenario.cost_change < 0 else '' }}">
+      {{ "{:+,.0f}".format(scenario.cost_change) }}<br>
+      <small>({{ "{:+.1f}".format(scenario.cost_change_pct) }}%)</small>
+    </td>
+    <td>
+      {{ "{:+.1f}".format(scenario.sales_change_pct) }}%
+    </td>
+    <td>{{ "%.2f"|format(scenario.roi) }}</td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h3>8.4 可視化</h3>
+{% if png_mr_balance %}
+<div class="img-container">
+  <img src="data:image/png;base64,{{ png_mr_balance }}" alt="MR vs Digital Balance Analysis">
+</div>
+<p style="font-size:0.9em; color:#616161; margin-top:8px;">
+  (a) シナリオ別コスト / (b) 売上変化率 / (c) ROI /
+  (d) 効率的フロンティア / (e) 配分マップ / (f) 限界効果 / (g) コスト効率性
+</p>
+{% else %}
+<p>mr_digital_balance.png が見つかりません。</p>
+{% endif %}
+
+<h3>8.5 実務的推奨アクション</h3>
+
+<div class="conclusion-box" style="background-color:#e8f5e9; border-left:4px solid #4caf50;">
+<h4>💡 最適シナリオの提案</h4>
+
+{% set best_roi_scenario = mr_balance_results.scenarios | selectattr("roi", "equalto", mr_balance_results.scenarios | map(attribute="roi") | max) | first %}
+
+<p style="font-size:1.1em; font-weight:bold; margin-top:10px;">
+  推奨: {{ best_roi_scenario.scenario_name }}
+</p>
+
+<table style="margin-top:10px;">
+  <tr>
+    <td style="width:50%; padding:10px; vertical-align:top;">
+      <strong>📋 現状</strong><br>
+      MR FTE: {{ "%.0f"|format(mr_balance_results.baseline.mr_fte) }}名<br>
+      デジタル予算: {{ "{:,.0f}".format(mr_balance_results.baseline.digital_budget) }}万円<br>
+      総コスト: {{ "{:,.0f}".format(mr_balance_results.current_status.total_cost) }}万円<br>
+      ROI: {{ "%.2f"|format(mr_balance_results.scenarios[0].roi) }}
+    </td>
+    <td style="width:50%; padding:10px; vertical-align:top; background-color:#e8f5e9;">
+      <strong>✅ 推奨配分</strong><br>
+      MR FTE: {{ "%.0f"|format(best_roi_scenario.mr_fte) }}名<br>
+      デジタル予算: {{ "{:,.0f}".format(best_roi_scenario.digital_budget) }}万円<br>
+      総コスト: {{ "{:,.0f}".format(best_roi_scenario.total_cost) }}万円<br>
+      ROI: {{ "%.2f"|format(best_roi_scenario.roi) }}
+    </td>
+  </tr>
+</table>
+
+<ul style="margin-top:15px; padding-left:20px;">
+  <li><strong>コスト削減額</strong>: {{ "{:,.0f}".format(-best_roi_scenario.cost_change) }}万円
+      ({{ "%.0f"|format(-best_roi_scenario.cost_change_pct) }}%削減)</li>
+  <li><strong>売上への影響</strong>: {{ "{:+.1f}".format(best_roi_scenario.sales_change_pct) }}%</li>
+  <li><strong>ROI改善</strong>: {{ "%.2f"|format(mr_balance_results.scenarios[0].roi) }} →
+      {{ "%.2f"|format(best_roi_scenario.roi) }}
+      ({{ "%.1f"|format((best_roi_scenario.roi / mr_balance_results.scenarios[0].roi - 1) * 100) }}%向上)</li>
+</ul>
+</div>
+
+<div class="highlight-box" style="background-color:#fff3cd; border-left:4px solid #ffc107;">
+<h4>⚠️ 重要な注意事項</h4>
+<ul style="margin:8px 0; padding-left:20px;">
+  <li>{{ mr_balance_results.interpretation.warning }}</li>
+  <li>{{ mr_balance_results.interpretation.recommendation }}</li>
+  <li>実際のリソース配分変更は、段階的に実施し、効果を検証しながら進めることを推奨</li>
+  <li>MR活動には定量化されない価値（関係構築、情報収集など）も存在する</li>
+</ul>
+</div>
+
+{% else %}
+<p>MR vs デジタルバランス分析結果が見つかりません。<code>08_mr_digital_balance.py</code>を実行してください。</p>
+{% endif %}
+</section>
+
+<!-- ============================================================ -->
+<!-- Section 9: 結論 -->
+<!-- ============================================================ -->
+<section id="sec9">
+<h2>9. 結論・主な知見</h2>
 
 <div class="conclusion-box">
 <h3>全体効果</h3>
@@ -1822,6 +2018,7 @@ template_data = {
     "png_physician_viewing": existing_pngs.get("physician_viewing_analysis.png", ""),
     "png_propensity_score": existing_pngs.get("propensity_score_analysis.png", ""),
     "png_mr_mediation": existing_pngs.get("mr_activity_mediation.png", ""),
+    "png_mr_balance": existing_pngs.get("mr_digital_balance.png", ""),
 
     # 医師視聴パターン分析
     "pv_results": DotDict(physician_viewing_results) if physician_viewing_results else None,
@@ -1833,6 +2030,9 @@ template_data = {
 
     # MR活動Mediation分析
     "mr_results": DotDict(mr_mediation_results) if mr_mediation_results else None,
+
+    # MR vs デジタルバランス分析
+    "mr_balance_results": DotDict(mr_digital_balance_results) if mr_digital_balance_results else None,
 }
 
 html_content = HTML_TEMPLATE.render(**template_data)
