@@ -71,17 +71,126 @@ CATE_DIMS = [
     ("baseline_cat", ["低", "中", "高"]),
 ]
 
-# オプション属性ファイル: 存在すれば読み込んでマージ
-OPTIONAL_ATTR_FILES = [
-    {"file": "doctor_attributes.csv", "key": "doc", "merge_key": "doctor_id", "dims": [
-        ("experience_cat", None),
-        ("specialty", None),
-    ]},
-    {"file": "facility_attributes.csv", "key": "fac_honin", "merge_key": "facility_id", "dims": [
-        ("region", None),
-        ("facility_type", None),
-    ]},
+# ===================================================================
+# 属性ファイル設定 ― 分析するカラムをリストで指定
+# ===================================================================
+
+# --- 医師属性 (doctor_attribute.csv) ---
+#   IDカラム  : doc
+#   名前カラム: doc_name  (自動除外)
+FILE_DOCTOR_ATTR = "doctor_attribute.csv"
+DOCTOR_ATTR_ID_COL = "doc"
+DOCTOR_ATTR_SELECTED: list = [      # ← 分析したいカラム名をここに列挙
+    # "specialty",
+    # "age",
+    # "experience_years",
 ]
+
+# --- 施設属性 (facility_attribute.csv) ---
+#   IDカラム  : fac_honin
+#   名前カラム: fac_honin_name  (自動除外)
+FILE_FACILITY_ATTR = "facility_attribute.csv"
+FACILITY_ATTR_ID_COL = "fac_honin"
+FACILITY_ATTR_SELECTED: list = [    # ← 分析したいカラム名をここに列挙
+    # "region",
+    # "facility_type",
+    # "bed_count",
+]
+
+# 連続値カラムのカテゴリ化設定
+#   指定なし       → 自動で3分位（低 / 中 / 高）
+#   "bins"         → pd.cut の境界値と labels を明示
+#   "method":"median" → 中央値で2分割
+CONTINUOUS_BINS: dict = {
+    # "age":       {"bins": [0, 40, 55, 200], "labels": ["<40歳", "40-55歳", "55歳+"]},
+    # "bed_count": {"method": "median"},
+}
+
+
+# ================================================================
+# 属性ファイル読み込み・カテゴリ化ユーティリティ
+# ================================================================
+
+def _show_and_bin(df, col, continuous_bins):
+    """連続値カラムの分布を表示しカテゴリ化する。新カラム名とlevelsを返す。"""
+    s = df[col].dropna()
+    desc = s.describe()
+    print(f"      分布: min={desc['min']:.1f}  Q1={desc['25%']:.1f}  "
+          f"中央値={desc['50%']:.1f}  Q3={desc['75%']:.1f}  max={desc['max']:.1f}")
+
+    new_col = f"{col}_cat"
+    cfg = continuous_bins.get(col, {})
+
+    if "bins" in cfg:
+        df[new_col] = pd.cut(df[col], bins=cfg["bins"], labels=cfg["labels"])
+        levels = list(cfg["labels"])
+        print(f"      → カスタムbinsでカテゴリ化: {levels}")
+    elif cfg.get("method") == "median":
+        med = s.median()
+        labels = [f"≤{med:.0f}", f">{med:.0f}"]
+        df[new_col] = pd.cut(df[col], bins=[-np.inf, med, np.inf], labels=labels)
+        levels = labels
+        print(f"      → 中央値({med:.1f})で2分割: {levels}")
+    else:
+        df[new_col] = pd.qcut(df[col], q=3, labels=["低", "中", "高"], duplicates="drop")
+        levels = ["低", "中", "高"]
+        print(f"      → 自動3分位でカテゴリ化: {levels}")
+
+    return new_col, levels
+
+
+def load_attr_file(filepath, id_col, id_rename, selected_cols, continuous_bins):
+    """属性CSVを読み込み、選択カラムを取得・連続値をカテゴリ化して返す。
+
+    Returns
+    -------
+    df_out : pd.DataFrame or None
+        IDカラム(id_rename) + カテゴリ化済みカラムのDataFrame
+    cate_dims : list of (col_name, levels)
+    """
+    if not os.path.exists(filepath):
+        print(f"  ファイルなし: {os.path.basename(filepath)} → スキップ")
+        return None, []
+
+    raw = pd.read_csv(filepath)
+    all_cols = [c for c in raw.columns if c not in (id_col,)]
+    print(f"  {os.path.basename(filepath)}: {len(raw):,} 行")
+    print(f"    利用可能カラム: {all_cols}")
+
+    if id_col not in raw.columns:
+        print(f"    IDカラム '{id_col}' が存在しません → スキップ")
+        return None, []
+
+    raw = raw.rename(columns={id_col: id_rename})
+
+    avail = [c for c in selected_cols if c in raw.columns]
+    missing = [c for c in selected_cols if c not in raw.columns]
+    if missing:
+        print(f"    警告: 選択カラムが見つかりません → {missing}")
+    if not avail:
+        print(f"    有効な選択カラムなし → スキップ")
+        return None, []
+
+    df_out = raw[[id_rename] + avail].drop_duplicates(subset=id_rename).copy()
+    cate_dims = []
+
+    for col in avail:
+        series = df_out[col]
+        is_numeric = pd.api.types.is_numeric_dtype(series)
+        n_unique = series.nunique()
+
+        if is_numeric and n_unique > 10:
+            # 連続値 → 分布を表示してカテゴリ化
+            print(f"    [{col}] 連続値 (ユニーク={n_unique})")
+            new_col, levels = _show_and_bin(df_out, col, continuous_bins)
+            cate_dims.append((new_col, levels))
+        else:
+            # カテゴリ値: そのまま使用
+            levels = sorted(series.dropna().unique().tolist(), key=str)
+            print(f"    [{col}] カテゴリ値: {levels}")
+            cate_dims.append((col, levels))
+
+    return df_out, cate_dims
 
 
 # ================================================================
@@ -320,45 +429,33 @@ baseline["baseline_cat"] = pd.qcut(baseline["baseline_amount"], q=3, labels=["�
 panel = panel.merge(baseline[["unit_id", "baseline_cat"]], on="unit_id", how="left")
 print(f"  baseline_cat: wash-out期間平均から3分位 → 低/中/高")
 
-# オプション属性ファイルの読み込み
-for attr_spec in OPTIONAL_ATTR_FILES:
-    attr_path = os.path.join(DATA_DIR, attr_spec["file"])
-    if not os.path.exists(attr_path):
-        print(f"  属性ファイル {attr_spec['file']} が見つかりません → スキップ")
+# 属性ファイルの読み込み・カテゴリ化・マージ
+_attr_configs = [
+    (os.path.join(DATA_DIR, FILE_DOCTOR_ATTR),   DOCTOR_ATTR_ID_COL,   "doctor_id",   DOCTOR_ATTR_SELECTED),
+    (os.path.join(DATA_DIR, FILE_FACILITY_ATTR), FACILITY_ATTR_ID_COL, "facility_id", FACILITY_ATTR_SELECTED),
+]
+
+for _filepath, _id_col, _id_rename, _selected in _attr_configs:
+    _fname = os.path.basename(_filepath)
+    if not _selected:
+        print(f"  {_fname}: 選択カラム未設定 → スキップ")
+        print(f"    (DOCTOR_ATTR_SELECTED / FACILITY_ATTR_SELECTED にカラム名を追加してください)")
         continue
 
-    print(f"  属性ファイル {attr_spec['file']} を読み込み中...")
-    attr_df = pd.read_csv(attr_path)
+    print(f"\n  {_fname} を読み込み中 ...")
+    _attr_df, _new_dims = load_attr_file(_filepath, _id_col, _id_rename, _selected, CONTINUOUS_BINS)
 
-    # キーカラムをリネーム
-    key_col = attr_spec["key"]
-    merge_key = attr_spec["merge_key"]
-    if key_col in attr_df.columns and key_col != merge_key:
-        attr_df = attr_df.rename(columns={key_col: merge_key})
-
-    # 使用可能な次元カラムを検出
-    dim_cols = []
-    for dim_name, _ in attr_spec["dims"]:
-        if dim_name in attr_df.columns:
-            dim_cols.append(dim_name)
-
-    if not dim_cols:
-        print(f"    → 使用可能な属性カラムなし")
+    if _attr_df is None or not _new_dims:
         continue
 
-    # マージ
-    merge_cols = [merge_key] + dim_cols
-    attr_unique = attr_df[merge_cols].drop_duplicates(subset=merge_key)
-    panel = panel.merge(attr_unique, on=merge_key, how="left")
+    # panelへマージ (panel には doctor_id / facility_id 列が存在する)
+    _dim_cols = [c for c, _ in _new_dims]
+    panel = panel.merge(_attr_df[[_id_rename] + _dim_cols], on=_id_rename, how="left")
 
-    # CATE_DIMSに追加
-    for dim_name, levels in attr_spec["dims"]:
-        if dim_name not in panel.columns:
-            continue
-        if levels is None:
-            levels = sorted(panel[dim_name].dropna().unique().tolist())
-        CATE_DIMS.append((dim_name, levels))
-        print(f"    属性 {dim_name} を追加: {levels}")
+    # CATE_DIMSへ追加
+    for _dim_name, _levels in _new_dims:
+        CATE_DIMS.append((_dim_name, _levels))
+        print(f"    CATE次元追加: {_dim_name} → {_levels}")
 
 # DGPのmodifierが参照可能な次元があるか確認
 has_true_mods = any(dim_name in TRUE_MODIFIERS for dim_name, _ in CATE_DIMS)
